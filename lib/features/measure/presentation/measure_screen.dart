@@ -267,8 +267,12 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
   }
 
   Future<String?> _showDeviceNameDialog() async {
+    // final controller = TextEditingController(
+    //   text: ref.read(targetDeviceNameProvider),
+    // );
+
     final controller = TextEditingController(
-      text: ref.read(targetDeviceNameProvider),
+      text: 'PSA00163',
     );
 
     return showDialog<String>(
