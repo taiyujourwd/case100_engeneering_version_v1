@@ -2,25 +2,26 @@ import 'dart:math' as math;
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../data/isar_schemas.dart';
+import '../providers/current_glucose_providers.dart';
 
-/// 雙 Y 軸曲線圖：左軸=血糖(mg/dL)、右軸=電流(A)
-/// - 換算關係：血糖(mg/dL) = slope × 電流(A) + intercept
-/// - Y軸範圍動態調整，可包含正負值
+/// 雙 Y 軸曲線圖：左軸=血糖(mg/dL)、右軸=電流(nA)
+/// - 換算關係:血糖(mg/dL) = slope × 電流(A) × 1E8 + intercept
+/// - Y軸範圍由 Riverpod Provider 控制
 /// - X軸顯示6分鐘視窗，每1分鐘一個刻度
-/// - 正弦波每5秒一個點，確保波形平滑完整
+/// - 使用接收到的時間和電流直接繪製曲線
+/// - 同一天延續繪製，不同天清空重新開始
 /// - 支持手勢縮放和滑動查看歷史
 /// - 點擊曲線顯示該點詳細資訊，並繪製虛線到X/Y軸
 /// - 點擊空白處可清除虛線和 tooltip
-class GlucoseChart extends StatefulWidget {
+class GlucoseChart extends ConsumerStatefulWidget {
   final List<Sample> samples;
   final int initialWindowSeconds;
   final double placeholderCurrentA;
   final double slope;
   final double intercept;
-  final double? fixedGlucoseMin, fixedGlucoseMax;
-  final double? fixedCurrentMin, fixedCurrentMax;
 
   const GlucoseChart({
     super.key,
@@ -29,17 +30,13 @@ class GlucoseChart extends StatefulWidget {
     this.placeholderCurrentA = 0.0,
     this.slope = 600.0,
     this.intercept = 0.0,
-    this.fixedGlucoseMin,
-    this.fixedGlucoseMax,
-    this.fixedCurrentMin,
-    this.fixedCurrentMax,
   });
 
   @override
-  State<GlucoseChart> createState() => _GlucoseChartState();
+  ConsumerState<GlucoseChart> createState() => _GlucoseChartState();
 }
 
-class _GlucoseChartState extends State<GlucoseChart> {
+class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   static const int windowMinutes = 6;
   static const double oneMinuteMs = 60 * 1000.0;
 
@@ -61,6 +58,12 @@ class _GlucoseChartState extends State<GlucoseChart> {
   bool _isDragging = false;
   double _dragStartX = 0;
 
+  // 保存原始采样数据（用于点击时显示实际值）
+  List<FlSpot> _rawCurrentSpots = [];
+
+  // 记录当前绘图的日期（用于检测日期变化）
+  DateTime? _currentPlotDate;
+
   @override
   void initState() {
     super.initState();
@@ -71,6 +74,7 @@ class _GlucoseChartState extends State<GlucoseChart> {
     DateTime startTime;
 
     if (widget.samples.isNotEmpty) {
+      // 直接使用第一个样本的时间，不再调用 _filterTodaySamples 避免递归
       _firstDataTime = widget.samples.first.ts;
       startTime = DateTime(
         _firstDataTime!.year,
@@ -104,8 +108,9 @@ class _GlucoseChartState extends State<GlucoseChart> {
       _isManualMode = false;
       _zoomLevel = 1.0;
       _initializeWindow();
-      if (widget.samples.isNotEmpty) {
-        final latestX = widget.samples.last.ts.millisecondsSinceEpoch.toDouble();
+      final todaySamples = _filterTodaySamples(widget.samples);
+      if (todaySamples.isNotEmpty) {
+        final latestX = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
         _advanceWindowIfNeeded(latestX);
       }
     });
@@ -122,9 +127,10 @@ class _GlucoseChartState extends State<GlucoseChart> {
       final newEndMs = _tEndMs - delta * dragSensitivity;
 
       // 檢查邊界：如果有數據，限制在數據範圍內
-      if (widget.samples.isNotEmpty) {
-        final firstDataMs = widget.samples.first.ts.millisecondsSinceEpoch.toDouble();
-        final lastDataMs = widget.samples.last.ts.millisecondsSinceEpoch.toDouble();
+      final todaySamples = _filterTodaySamples(widget.samples);
+      if (todaySamples.isNotEmpty) {
+        final firstDataMs = todaySamples.first.ts.millisecondsSinceEpoch.toDouble();
+        final lastDataMs = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
 
         // 不能滑到第一個數據點之前（右滑限制）
         if (newStartMs < firstDataMs) {
@@ -195,10 +201,49 @@ class _GlucoseChartState extends State<GlucoseChart> {
           '${dt.minute.toString().padLeft(2,'0')}:'
           '${dt.second.toString().padLeft(2,'0')}';
 
-  double _currentToGlucose(double current) {
-    return widget.slope * current + widget.intercept;
+  /// 检查日期是否为同一天
+  bool _isSameDay(DateTime date1, DateTime date2) {
+    return date1.year == date2.year &&
+        date1.month == date2.month &&
+        date1.day == date2.day;
   }
 
+  /// 检查是否需要重置（新的一天）
+  bool _shouldReset(DateTime latestDate) {
+    if (_currentPlotDate == null) return true;
+    return !_isSameDay(_currentPlotDate!, latestDate);
+  }
+
+  /// 过滤出当天的采样数据
+  List<Sample> _filterTodaySamples(List<Sample> allSamples) {
+    if (allSamples.isEmpty) return [];
+
+    // 获取最新样本的日期作为"今天"
+    final latestDate = allSamples.last.ts;
+
+    // 如果是新的一天，更新当前绘图日期（不在这里重置状态）
+    if (_currentPlotDate == null || !_isSameDay(_currentPlotDate!, latestDate)) {
+      _currentPlotDate = DateTime(
+        latestDate.year,
+        latestDate.month,
+        latestDate.day,
+      );
+    }
+
+    // 只返回与当前绘图日期相同的样本
+    return allSamples.where((sample) {
+      return _isSameDay(sample.ts, _currentPlotDate!);
+    }).toList();
+  }
+
+  /// 电流（A）转血糖（mg/dL）
+  /// 重要：电流需要先乘以 1E8 再计算
+  double _currentToGlucose(double currentAmperes) {
+    return widget.slope * (currentAmperes * 1E8) + widget.intercept;
+  }
+
+  /// 血糖（mg/dL）反算电流（已包含 *1E8 缩放）
+  /// 返回值需要除以 1E8 才是真实的安培值
   double _glucoseToCurrent(double glucose) {
     if (widget.slope == 0) return 0;
     return (glucose - widget.intercept) / widget.slope;
@@ -206,12 +251,38 @@ class _GlucoseChartState extends State<GlucoseChart> {
 
   @override
   Widget build(BuildContext context) {
-    final samples = widget.samples;
-    final hasData = samples.isNotEmpty;
-    final latestSample = hasData ? samples.last : null;
+    // 從 Provider 讀取血糖範圍（已包含由電流轉換來的範圍）
+    final glucoseRange = ref.watch(glucoseRangeProvider);
+
+    // ✅ 先过滤出当天的数据
+    final todaySamples = _filterTodaySamples(widget.samples);
+    final hasData = todaySamples.isNotEmpty;
+
+    // ✅ 检测日期变化并重置状态
+    if (widget.samples.isNotEmpty) {
+      final latestDate = widget.samples.last.ts;
+      if (_shouldReset(latestDate)) {
+        // 新的一天，重置状态
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            setState(() {
+              _isManualMode = false;
+              _zoomLevel = 1.0;
+              _firstDataTime = null;
+              _touchedY = null;
+              _touchedX = null;
+              _tooltipText = null;
+              _initializeWindow();  // 重新初始化窗口
+            });
+          }
+        });
+      }
+    }
+
+    final latestSample = hasData ? todaySamples.last : null;
 
     if (hasData && _firstDataTime == null) {
-      _firstDataTime = samples.first.ts;
+      _firstDataTime = todaySamples.first.ts;
       _initializeWindow();
     }
 
@@ -225,7 +296,7 @@ class _GlucoseChartState extends State<GlucoseChart> {
     final timestamp = latestSample != null ? _formatTime(latestSample.ts) : '--:--:--';
 
     final glucoseFromCurrent = currentA != null
-        ? _currentToGlucose(currentA*1E8).toStringAsFixed(1)
+        ? _currentToGlucose(currentA).toStringAsFixed(1)
         : '--';
 
     final currentDisplay = currentA != null
@@ -236,24 +307,18 @@ class _GlucoseChartState extends State<GlucoseChart> {
 
     final currBasisSpots = () {
       if (!hasData) {
-        return _buildPlaceholderSpots(widget.initialWindowSeconds, widget.placeholderCurrentA);
+        _rawCurrentSpots = _buildPlaceholderSpots(widget.initialWindowSeconds, widget.placeholderCurrentA);
+        return _rawCurrentSpots;
       }
 
-      final rawSpots = _mapToSortedSpots(samples, (s) => _getCurrent(s));
-      final fit = _buildSineFitFromSamples<Sample>(
-        samples,
-        pickY: (s) => _getCurrent(s),
-        pickTs: (s) => s.ts,
-        minPeriodSec: 5,
-        maxPeriodSec: 60,
-        minPoints: 3,
-      );
+      // 保存原始采样数据
+      _rawCurrentSpots = _mapToSortedSpots(todaySamples, (s) => _getCurrent(s));
 
-      return fit ?? rawSpots;
+      return _rawCurrentSpots;
     }();
 
     if (hasData) {
-      final latestX = samples.last.ts.millisecondsSinceEpoch.toDouble();
+      final latestX = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
       _advanceWindowIfNeeded(latestX);
     }
 
@@ -263,21 +328,15 @@ class _GlucoseChartState extends State<GlucoseChart> {
       currWin = _buildWindowAlignedPlaceholder(_tStartMs, _tEndMs, widget.placeholderCurrentA);
     }
 
-    final currRange = _calcRange(
-      currWin.map((e) => e.y),
-      fixedMin: widget.fixedCurrentMin,
-      fixedMax: widget.fixedCurrentMax,
-      targetTicks: 20,
-    );
-
     final glucoseFromCurrentWin = currWin
         .map((p) => FlSpot(p.x, _currentToGlucose(p.y)))
         .toList();
 
+    // ✅ 使用 Provider 提供的血糖範圍（已包含由電流轉換來的範圍）
     final gluRange = _calcRange(
       glucoseFromCurrentWin.map((e) => e.y),
-      fixedMin: widget.fixedGlucoseMin,
-      fixedMax: widget.fixedGlucoseMax,
+      fixedMin: glucoseRange.min,
+      fixedMax: glucoseRange.max,
       targetTicks: 12,
     );
 
@@ -337,8 +396,8 @@ class _GlucoseChartState extends State<GlucoseChart> {
                   // 計算移動距離
                   final dragDistance = (event.position.dx - _dragStartX).abs();
 
-                  // 如果移動超過10像素，認為是拖動手勢
-                  if (dragDistance > 10) {
+                  // ✅ 如果移動超過 15 像素，才認為是拖動手勢（增加容差）
+                  if (dragDistance > 15) {
                     _isDragging = true;
                     if (_lastDragPosition != null) {
                       final delta = event.position.dx - _lastDragPosition!;
@@ -390,10 +449,10 @@ class _GlucoseChartState extends State<GlucoseChart> {
                       maxY: gluRange.max,
                       clipData: FlClipData.all(),
                       lineBarsData: [
+                        // 1. 平滑曲線（不顯示點）
                         LineChartBarData(
                           spots: glucoseFromCurrentWin,
-                          isCurved: true,
-                          curveSmoothness: 0.35,
+                          isCurved: false,  // ✅ 改為直線連接，點會精確對齊
                           isStrokeCapRound: true,
                           barWidth: 2,
                           color: Colors.blue,
@@ -403,12 +462,30 @@ class _GlucoseChartState extends State<GlucoseChart> {
                               return FlDotCirclePainter(
                                 radius: 3,
                                 color: Colors.blue,
-                                strokeWidth: 1,
+                                strokeWidth: 1.5,
                                 strokeColor: Colors.white,
                               );
                             },
                           ),
                           belowBarData: BarAreaData(show: false),
+                        ),
+                        // 2. 原始數據點（精確位置）
+                        LineChartBarData(
+                          spots: glucoseFromCurrentWin,
+                          isCurved: false,
+                          barWidth: 0,  // 不畫線
+                          color: Colors.transparent,
+                          dotData: FlDotData(
+                            show: true,
+                            getDotPainter: (spot, percent, barData, index) {
+                              return FlDotCirclePainter(
+                                radius: 3,
+                                color: Colors.blue,
+                                strokeWidth: 1.5,
+                                strokeColor: Colors.white,
+                              );
+                            },
+                          ),
                         ),
                       ],
                       gridData: FlGridData(
@@ -462,23 +539,29 @@ class _GlucoseChartState extends State<GlucoseChart> {
                             reservedSize: 55,
                             interval: rightInterval,
                             getTitlesWidget: (glucoseValue, _) {
-                              final current = _glucoseToCurrent(glucoseValue);
+                              // 血糖值反算得到 (电流 * 1E8)
+                              final currentTimesE8 = _glucoseToCurrent(glucoseValue);
+                              // 转换成实际电流（A）：除以 1E8
+                              final currentAmperes = currentTimesE8 / 1E8;
+                              // 转换成 nA：A * 1E9
+                              final currentNanoAmperes = currentAmperes * 1E9;
+
                               String text;
-                              if (current.abs() < 1e-6) {
-                                text = current.toStringAsExponential(2);
-                              } else if (current.abs() < 0.001) {
-                                text = current.toStringAsExponential(1);
-                              } else if (current.abs() < 1) {
-                                text = current.toStringAsFixed(4);
+                              if (currentNanoAmperes.abs() < 0.01) {
+                                text = currentNanoAmperes.toStringAsExponential(2);
+                              } else if (currentNanoAmperes.abs() < 1) {
+                                text = currentNanoAmperes.toStringAsFixed(3);
+                              } else if (currentNanoAmperes.abs() < 10) {
+                                text = currentNanoAmperes.toStringAsFixed(2);
                               } else {
-                                text = current.toStringAsFixed(2);
+                                text = currentNanoAmperes.toStringAsFixed(1);
                               }
                               return Text(text, style: const TextStyle(fontSize: 8));
                             },
                           ),
                           axisNameWidget: const Padding(
                             padding: EdgeInsets.only(right: 8, bottom: 4),
-                            child: Text('Current (A)'),
+                            child: Text('Current (nA)'),
                           ),
                           axisNameSize: 20,
                         ),
@@ -507,12 +590,11 @@ class _GlucoseChartState extends State<GlucoseChart> {
                       ),
                       lineTouchData: LineTouchData(
                         enabled: !_isDragging,
-                        // 禁用內建 tooltip，使用自定義覆蓋層
+                        touchSpotThreshold: 50,  // ✅ 增加触摸检测范围（像素）
                         touchTooltipData: LineTouchTooltipData(
                           getTooltipColor: (touchedSpot) => Colors.transparent,
                           tooltipPadding: EdgeInsets.zero,
                           tooltipMargin: 0,
-                          // ✅ 返回與 touchedSpots 相同數量的 null 項目
                           getTooltipItems: (touchedSpots) =>
                               touchedSpots.map((_) => null).toList(),
                         ),
@@ -539,28 +621,61 @@ class _GlucoseChartState extends State<GlucoseChart> {
                           }).toList();
                         },
                         touchCallback: (FlTouchEvent event, LineTouchResponse? response) {
-                          // 只在點擊事件時更新（非拖動）
-                          if (!_isDragging) {
+                          if (!_isDragging && event is! FlPanUpdateEvent) {  // ✅ 排除拖动事件
                             setState(() {
                               if (response != null &&
                                   response.lineBarSpots != null &&
                                   response.lineBarSpots!.isNotEmpty) {
-                                // 點擊到曲線上的點
-                                final spot = response.lineBarSpots!.first;
-                                _touchedY = spot.y;
-                                _touchedX = spot.x;
+                                // 优先从第二条线（原始采样点）获取数据
+                                final touchedSpots = response.lineBarSpots!;
+                                FlSpot? targetSpot;
 
-                                // 生成並保存 tooltip 文字
-                                final dt = DateTime.fromMillisecondsSinceEpoch(spot.x.toInt());
-                                final timeStr = _formatTime(dt);
-                                final glucose = spot.y;
-                                final current = _glucoseToCurrent(glucose);
+                                // 如果点击到原始采样点（第二条线），直接使用
+                                if (touchedSpots.any((spot) => spot.barIndex == 1)) {
+                                  targetSpot = touchedSpots.firstWhere((spot) => spot.barIndex == 1);
+                                } else if (touchedSpots.isNotEmpty) {
+                                  // 否则点击到拟合曲线，找最近的原始采样点
+                                  final touchedX = touchedSpots.first.x;
 
-                                _tooltipText = '時間: $timeStr\n'
-                                    '血糖: ${glucose.toStringAsFixed(2)} mg/dL\n'
-                                    '電流: ${current.toStringAsExponential(2)} A';
+                                  FlSpot? closestRawSpot;
+                                  double minDistance = double.infinity;
+
+                                  for (final rawSpot in _rawCurrentSpots) {
+                                    if (rawSpot.x >= _tStartMs && rawSpot.x < _tEndMs) {
+                                      final distance = (rawSpot.x - touchedX).abs();
+                                      if (distance < minDistance) {
+                                        minDistance = distance;
+                                        closestRawSpot = rawSpot;
+                                      }
+                                    }
+                                  }
+
+                                  if (closestRawSpot != null) {
+                                    // 转换为血糖值用于显示
+                                    targetSpot = FlSpot(
+                                      closestRawSpot.x,
+                                      _currentToGlucose(closestRawSpot.y),
+                                    );
+                                  }
+                                }
+
+                                if (targetSpot != null) {
+                                  _touchedY = targetSpot.y;
+                                  _touchedX = targetSpot.x;
+
+                                  final dt = DateTime.fromMillisecondsSinceEpoch(targetSpot.x.toInt());
+                                  final timeStr = _formatTime(dt);
+
+                                  // 从血糖反算原始电流
+                                  final actualCurrentA = _glucoseToCurrent(targetSpot.y) / 1E8;
+                                  final currentNanoAmperes = actualCurrentA * 1E9;
+
+                                  _tooltipText = '時間: $timeStr\n'
+                                      '血糖: ${targetSpot.y.toStringAsFixed(2)} mg/dL\n'
+                                      '電流: ${currentNanoAmperes.toStringAsFixed(2)} nA\n'
+                                      '(實際採樣值)';
+                                }
                               } else if (event is FlTapUpEvent) {
-                                // 點擊空白處：清除虛線和 tooltip
                                 _touchedY = null;
                                 _touchedX = null;
                                 _tooltipText = null;
@@ -571,7 +686,6 @@ class _GlucoseChartState extends State<GlucoseChart> {
                         handleBuiltInTouches: true,
                       ),
                       extraLinesData: ExtraLinesData(
-                        // Y軸水平虛線
                         horizontalLines: _touchedY != null
                             ? [
                           HorizontalLine(
@@ -583,7 +697,6 @@ class _GlucoseChartState extends State<GlucoseChart> {
                           ),
                         ]
                             : [],
-                        // X軸垂直虛線（新增）
                         verticalLines: _touchedX != null
                             ? [
                           VerticalLine(
@@ -619,16 +732,26 @@ class _GlucoseChartState extends State<GlucoseChart> {
                     color: Colors.black.withOpacity(0.6),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Text(
-                    '${(windowMinutes * _zoomLevel).toStringAsFixed(0)} 分鐘',
-                    style: const TextStyle(color: Colors.white, fontSize: 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        '${(windowMinutes * _zoomLevel).toStringAsFixed(0)} 分鐘 | ${todaySamples.length} 點',
+                        style: const TextStyle(color: Colors.white, fontSize: 12),
+                      ),
+                      if (_currentPlotDate != null)
+                        Text(
+                          '${_currentPlotDate!.year}/${_currentPlotDate!.month.toString().padLeft(2, '0')}/${_currentPlotDate!.day.toString().padLeft(2, '0')}',
+                          style: const TextStyle(color: Colors.white70, fontSize: 10),
+                        ),
+                    ],
                   ),
                 ),
               ),
-              // 自定義 tooltip 覆蓋層（持久顯示，不阻擋觸摸）
               if (_tooltipText != null && _touchedX != null && _touchedY != null)
                 Positioned(
-                  left: 16, // 固定在左上角，不會擋到圖表中的點
+                  left: 16,
                   top: 60,
                   child: IgnorePointer(
                     child: Container(
@@ -784,95 +907,6 @@ class _GlucoseChartState extends State<GlucoseChart> {
     }
 
     return interval;
-  }
-
-  List<FlSpot>? _buildSineFitFromSamples<T>(
-      List<T> samples, {
-        required double Function(T) pickY,
-        required DateTime Function(T) pickTs,
-        double minPeriodSec = 5,
-        double maxPeriodSec = 60,
-        int omegaSteps = 60,
-        int minPoints = 8,
-      }) {
-    if (samples.length < minPoints) return null;
-
-    final t0 = pickTs(samples.first).millisecondsSinceEpoch / 1000.0;
-    final ts = samples
-        .map((s) => pickTs(s).millisecondsSinceEpoch / 1000.0 - t0)
-        .toList();
-    final ys = samples.map((s) => pickY(s)).toList();
-
-    final meanY = ys.reduce((a, b) => a + b) / ys.length;
-    final yCentered = ys.map((v) => v - meanY).toList();
-
-    final minW = 2 * math.pi / maxPeriodSec;
-    final maxW = 2 * math.pi / minPeriodSec;
-
-    double bestW = minW;
-    double bestPower = double.negativeInfinity;
-
-    for (int k = 0; k < omegaSteps; k++) {
-      final w = minW + (maxW - minW) * (k / (omegaSteps - 1));
-      double Sy = 0, Cy = 0, S2 = 0, C2 = 0;
-
-      for (int i = 0; i < ts.length; i++) {
-        final s = math.sin(w * ts[i]);
-        final c = math.cos(w * ts[i]);
-        final y = yCentered[i];
-        Sy += y * s;
-        Cy += y * c;
-        S2 += s * s;
-        C2 += c * c;
-      }
-
-      final power = (Sy * Sy) / (S2 + 1e-12) + (Cy * Cy) / (C2 + 1e-12);
-      if (power > bestPower) {
-        bestPower = power;
-        bestW = w;
-      }
-    }
-
-    double Sy = 0, Cy = 0, S2 = 0, C2 = 0;
-    for (int i = 0; i < ts.length; i++) {
-      final s = math.sin(bestW * ts[i]);
-      final c = math.cos(bestW * ts[i]);
-      final y = yCentered[i];
-      Sy += y * s;
-      Cy += y * c;
-      S2 += s * s;
-      C2 += c * c;
-    }
-
-    if (S2 < 1e-9 && C2 < 1e-9) return null;
-
-    final a = Sy / (S2 + 1e-12);
-    final b = Cy / (C2 + 1e-12);
-    final R = math.sqrt(a * a + b * b);
-    final phi = math.atan2(b, a);
-
-    final spots = <FlSpot>[];
-    final tMin = ts.first;
-    final tMax = ts.last;
-
-    // 每18秒生成一個點，讓正弦波更平滑完整
-    const intervalSec = 18.0;
-    double t = tMin;
-
-    while (t <= tMax) {
-      final yFit = meanY + R * math.sin(bestW * t + phi);
-      final msEpoch = ((t + t0) * 1000).toInt();
-      spots.add(FlSpot(msEpoch.toDouble(), yFit));
-      t += intervalSec;
-    }
-
-    if ((tMax - (t - intervalSec)).abs() > 1.0) {
-      final yFit = meanY + R * math.sin(bestW * tMax + phi);
-      final msEpoch = ((tMax + t0) * 1000).toInt();
-      spots.add(FlSpot(msEpoch.toDouble(), yFit));
-    }
-
-    return spots;
   }
 }
 

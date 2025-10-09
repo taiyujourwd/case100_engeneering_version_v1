@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../providers/current_glucose_providers.dart';
 
 class GlucoseScaleResult {
   final double yMax;
@@ -11,7 +14,7 @@ class GlucoseScaleResult {
   });
 }
 
-// 使用方法：在 settings_dialog.dart 的 "Set Scale by 濃度" 按鈕中調用
+/// 使用方法：在 settings_dialog.dart 的 "Set Scale by 濃度" 按鈕中調用
 Future<GlucoseScaleResult?> showGlucoseDialog(BuildContext context) async {
   final result = await showDialog<GlucoseScaleResult>(
     context: context,
@@ -27,14 +30,14 @@ Future<GlucoseScaleResult?> showGlucoseDialog(BuildContext context) async {
   return result; // null 表示 Exit
 }
 
-class EditScaleDialog extends StatefulWidget {
+class EditScaleDialog extends ConsumerStatefulWidget {
   const EditScaleDialog({super.key});
 
   @override
-  State<EditScaleDialog> createState() => _EditScaleDialogState();
+  ConsumerState<EditScaleDialog> createState() => _EditScaleDialogState();
 }
 
-class _EditScaleDialogState extends State<EditScaleDialog> {
+class _EditScaleDialogState extends ConsumerState<EditScaleDialog> {
   final TextEditingController _yMaxController = TextEditingController();
   final TextEditingController _yMinController = TextEditingController();
 
@@ -47,8 +50,8 @@ class _EditScaleDialogState extends State<EditScaleDialog> {
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _yMaxController.text = prefs.getString('scale_y_max') ?? '3000.0';
-      _yMinController.text = prefs.getString('scale_y_min') ?? '-120.0';
+      _yMaxController.text = prefs.getString('glucose_y_max') ?? '300.0';
+      _yMinController.text = prefs.getString('glucose_y_min') ?? '-120.0';
     });
   }
 
@@ -144,6 +147,12 @@ class _EditScaleDialogState extends State<EditScaleDialog> {
                             final result = _createScaleResult();
                             if (result != null) {
                               await _saveSettings();
+
+                              // ✅ 更新 Riverpod Provider，立即反映到圖表
+                              await ref
+                                  .read(glucoseRangeProvider.notifier)
+                                  .updateRange(result.yMin, result.yMax);
+
                               if (context.mounted) {
                                 Navigator.of(context).pop(result);
                               }

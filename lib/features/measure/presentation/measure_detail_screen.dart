@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../providers.dart';
+import 'providers/ble_providers.dart';
 import 'widgets/glucose_chart.dart';
 
 class MeasureDetailScreen extends ConsumerWidget {

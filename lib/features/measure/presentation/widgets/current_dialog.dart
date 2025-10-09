@@ -1,5 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../providers/current_glucose_providers.dart';
+
 
 class CurrentScaleResult {
   final double yMax;
@@ -11,7 +15,7 @@ class CurrentScaleResult {
   });
 }
 
-// 使用方法：在 settings_dialog.dart 的 _showCurrentDialog 中調用
+/// 使用方法：在 settings_dialog.dart 的 _showCurrentDialog 中調用
 Future<CurrentScaleResult?> showCurrentDialog(BuildContext context) async {
   final result = await showDialog<CurrentScaleResult>(
     context: context,
@@ -22,14 +26,14 @@ Future<CurrentScaleResult?> showCurrentDialog(BuildContext context) async {
   return result; // null 表示 Exit
 }
 
-class CurrentDialog extends StatefulWidget {
+class CurrentDialog extends ConsumerStatefulWidget {
   const CurrentDialog({super.key});
 
   @override
-  State<CurrentDialog> createState() => _CurrentDialogState();
+  ConsumerState<CurrentDialog> createState() => _CurrentDialogState();
 }
 
-class _CurrentDialogState extends State<CurrentDialog> {
+class _CurrentDialogState extends ConsumerState<CurrentDialog> {
   final TextEditingController _yMaxController = TextEditingController();
   final TextEditingController _yMinController = TextEditingController();
 
@@ -42,8 +46,8 @@ class _CurrentDialogState extends State<CurrentDialog> {
   Future<void> _loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     setState(() {
-      _yMaxController.text = prefs.getString('current_y_max') ?? '5.0';
-      _yMinController.text = prefs.getString('current_y_min') ?? '0.0';
+      _yMaxController.text = prefs.getString('current_y_max') ?? '50.0';
+      _yMinController.text = prefs.getString('current_y_min') ?? '-2.0';
     });
   }
 
@@ -51,6 +55,16 @@ class _CurrentDialogState extends State<CurrentDialog> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('current_y_max', _yMaxController.text);
     await prefs.setString('current_y_min', _yMinController.text);
+  }
+
+  /// 電流轉血糖
+  /// 用戶輸入的是 nA（納安），需要轉換：
+  /// - nA → A：乘以 1E-9
+  /// - A → 血糖計算用的單位：乘以 1E8
+  /// - 合併：nA * 1E-9 * 1E8 = nA * 0.1
+  /// 最終：glucose = slope * (nA * 0.1) + intercept
+  double _currentToGlucose(double currentNanoAmperes, double slope, double intercept) {
+    return slope * (currentNanoAmperes * 0.1) + intercept;
   }
 
   CurrentScaleResult? _createResult() {
@@ -136,6 +150,26 @@ class _CurrentDialogState extends State<CurrentDialog> {
                             final result = _createResult();
                             if (result != null) {
                               await _saveSettings();
+
+                              // ✅ 讀取 slope 和 intercept
+                              final prefs = await SharedPreferences.getInstance();
+                              final slope = double.tryParse(prefs.getString('correction_slope') ?? '600.0') ?? 600.0;
+                              final intercept = double.tryParse(prefs.getString('correction_intercept') ?? '0.0') ?? 0.0;
+
+                              // ✅ 將電流範圍轉換為血糖範圍
+                              final glucoseMin = _currentToGlucose(result.yMin, slope, intercept);
+                              final glucoseMax = _currentToGlucose(result.yMax, slope, intercept);
+
+                              // ✅ 更新電流 Provider（保存用戶輸入）
+                              await ref
+                                  .read(currentRangeProvider.notifier)
+                                  .updateRange(result.yMin, result.yMax);
+
+                              // ✅ 同時更新血糖 Provider（用於圖表顯示）
+                              await ref
+                                  .read(glucoseRangeProvider.notifier)
+                                  .updateRange(glucoseMin, glucoseMax);
+
                               if (context.mounted) {
                                 Navigator.of(context).pop(result);
                               }
@@ -184,19 +218,19 @@ class _CurrentDialogState extends State<CurrentDialog> {
             decimal: true,
             signed: true,
           ),
-          decoration: InputDecoration(
+          decoration: const InputDecoration(
             filled: true,
             fillColor: Colors.white,
-            border: const UnderlineInputBorder(
+            border: UnderlineInputBorder(
               borderSide: BorderSide(color: Colors.black54),
             ),
-            enabledBorder: const UnderlineInputBorder(
+            enabledBorder: UnderlineInputBorder(
               borderSide: BorderSide(color: Colors.black54),
             ),
-            focusedBorder: const UnderlineInputBorder(
+            focusedBorder: UnderlineInputBorder(
               borderSide: BorderSide(color: Colors.black87, width: 2),
             ),
-            contentPadding: const EdgeInsets.symmetric(
+            contentPadding: EdgeInsets.symmetric(
               horizontal: 12,
               vertical: 12,
             ),

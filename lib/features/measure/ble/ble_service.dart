@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'package:location/location.dart' as loc;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/ble_device.dart';
 
@@ -155,6 +156,10 @@ class BleService {
   final _deviceDataController = StreamController<BleDeviceData>.broadcast();
   Stream<BleDeviceData> get deviceDataStream => _deviceDataController.stream;
 
+  // ✅ 版本號 StreamController
+  final _deviceVersionController = StreamController<String>.broadcast();
+  Stream<String> get deviceVersionStream => _deviceVersionController.stream;
+
   final Set<String> _initializedDevices = {};
   final Map<String, bool> _timeWritten = {};
   bool _gattBusy = false;
@@ -267,6 +272,14 @@ class BleService {
     debugPrint('⏹️ 已停止掃描');
   }
 
+  Future<void> _saveDeviceVersion(String deviceVersion) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('device_version', deviceVersion);
+
+    // ✅ 發送版本號到 Stream
+    _deviceVersionController.add(deviceVersion);
+  }
+
   // ------- 初始化：連線 → 寫時間 → 讀版本 -------
   Future<void> _initializeDevice(String deviceId) async {
     debugPrint('🔗 初始化裝置：$deviceId');
@@ -315,6 +328,7 @@ class BleService {
             try {
               final fw = await _readFirmwareVersion(deviceId, chars.rdFw);
               if (fw != null) {
+                _saveDeviceVersion(fw);
                 debugPrint('📦 韌體版本：$fw');
               }
             } catch (e) {
@@ -559,6 +573,7 @@ class BleService {
     _scanSub?.cancel();
     _connSub?.cancel();
     _deviceDataController.close();
+    _deviceVersionController.close();
   }
 
   /// 將 List<int>/Uint8List 轉成十六進位清單樣式：[C0, AD, 00, 5A, ...]

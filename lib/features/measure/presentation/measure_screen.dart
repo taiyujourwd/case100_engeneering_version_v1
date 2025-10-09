@@ -1,3 +1,4 @@
+import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/device_info_providers.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/settings_dialog.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/smoothing_settings_dialog.dart';
 import 'package:flutter/material.dart';
@@ -6,7 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../common/utils/date_key.dart';
 import '../data/isar_schemas.dart';
 import '../data/measure_repository.dart';
-import '../providers.dart';
+import 'providers/ble_providers.dart';
 import '../screens/qu_scan_screen.dart';
 import 'widgets/glucose_chart.dart';
 import 'measure_detail_screen.dart';
@@ -31,6 +32,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     super.initState();
     _dayKey = dayKeyOf(DateTime.now());
     _loadScannedDevice(); // 載入已掃描的設備
+    _loadDeviceInfo();
   }
 
   // 載入已掃描的設備名稱
@@ -39,6 +41,23 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     final deviceName = prefs.getString('scanned_device_name');
     if (deviceName != null) {
       setState(() => _scannedDeviceName = deviceName);
+    }
+  }
+
+  // ✅ 載入設備資訊
+  Future<void> _loadDeviceInfo() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // 載入設備名稱
+    final deviceName = prefs.getString('device_name') ?? '';
+    if (deviceName.isNotEmpty) {
+      ref.read(targetDeviceNameProvider.notifier).state = deviceName;
+    }
+
+    // 載入設備版本
+    final deviceVersion = prefs.getString('device_version') ?? '';
+    if (deviceVersion.isNotEmpty) {
+      ref.read(targetDeviceVersionProvider.notifier).state = deviceVersion;
     }
   }
 
@@ -84,7 +103,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     final repoAsync = ref.watch(repoProvider);
     final bleConnected = ref.watch(bleConnectionStateProvider);
 
-    // 監聽 BLE 數據流
+    // ✅ 監聽版本號更新
+    ref.listen(bleDeviceVersionStreamProvider, (previous, next) {
+      next.whenData((version) {
+        if (version.isNotEmpty) {
+          ref.read(targetDeviceVersionProvider.notifier).state = version;
+          debugPrint('✅ UI 版本號已更新：$version');
+        }
+      });
+    });
+
+    // ✅ 監聽 BLE 數據流
     ref.listen(bleDeviceDataStreamProvider, (previous, next) {
       next.whenData((data) async {
         debugPrint('📊 收到 BLE 數據：\n'
@@ -266,13 +295,33 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
             color: Colors.blue[50],
-            child: Text(
-              '設備：${ref.read(targetDeviceNameProvider.notifier).state}',
-              textAlign: TextAlign.center,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  '設備：${
+                      ref.watch(targetDeviceNameProvider).isEmpty ?
+                      '未輸入設備名稱':ref.watch(targetDeviceNameProvider)
+                  }',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                SizedBox(width: 20,),
+                Text(
+                  '版本：${
+                      ref.watch(targetDeviceVersionProvider).isEmpty ?
+                      '設備未連接':ref.watch(targetDeviceVersionProvider)
+                  }',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
             ),
           ),
           BottomNavigationBar(
@@ -344,15 +393,22 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
       _toast('已停止藍芽掃描');
       debugPrint('已停止藍芽掃描');
     } else {
-      // 顯示裝置名稱輸入對話框
-      final deviceName = await _showDeviceNameDialog();
-      if (deviceName != null) {
-        ref.read(targetDeviceNameProvider.notifier).state = deviceName;
-        await bleService.startScan(targetName: deviceName.isEmpty ? null : deviceName);
-        ref.read(bleConnectionStateProvider.notifier).state = true;
-        _toast('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
-        debugPrint('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
+      // 先檢查 SharedPreferences 是否有儲存的設備名稱
+      final prefs = await SharedPreferences.getInstance();
+      String? deviceName = prefs.getString('device_name');
+
+      // 如果沒有儲存的設備名稱，則顯示對話框
+      if (deviceName == null || deviceName.isEmpty) {
+        deviceName = await _showDeviceNameDialog();
+        if (deviceName == null) return; // 使用者取消了對話框
       }
+
+      // 使用設備名稱開始掃描
+      ref.read(targetDeviceNameProvider.notifier).state = deviceName;
+      await bleService.startScan(targetName: deviceName.isEmpty ? null : deviceName);
+      ref.read(bleConnectionStateProvider.notifier).state = true;
+      _toast('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
+      debugPrint('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
     }
   }
 
