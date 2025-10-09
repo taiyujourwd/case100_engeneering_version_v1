@@ -199,8 +199,12 @@ class BleService {
   }
 
   // ------- 掃描 -------
-  Future<void> startScan({String? targetName}) async {
+  Future<void> startScan({String? targetName, String? targetId}) async {
     if (_isScanning) return;
+
+    // 假如上次沒收乾淨，這裡再保險一次
+    await _scanSub?.cancel();
+    _scanSub = null;
 
     final ok = await requestPermissions();
     if (!ok) {
@@ -214,9 +218,15 @@ class BleService {
     _scanSub = _ble
         .scanForDevices(withServices: [], scanMode: ScanMode.lowLatency)
         .listen((device) async {
-      // 名稱過濾（可選）
+      // ✅ 先以 MAC/Id 過濾（最穩）
+      if (targetId != null && targetId.isNotEmpty && device.id != targetId) {
+        return;
+      }
+      // ✅ 名稱只做寬鬆比對
       if (targetName != null && targetName.isNotEmpty) {
-        if (device.name != targetName) return;
+        final n = device.name.toLowerCase();
+        final q = targetName.toLowerCase();
+        if (!(n.contains(q) || n.startsWith(q))) return;
       }
 
       debugPrint('📡 發現裝置：${device.name} (${device.id}) RSSI=${device.rssi}');
@@ -229,10 +239,25 @@ class BleService {
       if (!_initializedDevices.contains(device.id)) {
         await _initializeDevice(device.id);
       }
-    }, onError: (e) {
+    }, onError: (e) async{
       debugPrint('❌ 掃描錯誤：$e');
-      _isScanning = false;
+      _isScanning = false;             // ✅ 確保旗標回復
+      await Future.delayed(const Duration(milliseconds: 500));
+      await restartScan();
+    }, onDone: () async{
+      debugPrint('ℹ️ 掃描串流已結束');
+      _isScanning = false;             // ✅ 確保旗標回復
+      await Future.delayed(const Duration(milliseconds: 500));
+      await restartScan();
     });
+  }
+
+  Future<void> restartScan({String? targetName}) async {
+    await _scanSub?.cancel();
+    _scanSub = null;
+    _isScanning = false;
+    await Future.delayed(const Duration(milliseconds: 200));
+    await startScan(targetName: targetName);
   }
 
   Future<void> stopScan() async {
@@ -247,7 +272,7 @@ class BleService {
     debugPrint('🔗 初始化裝置：$deviceId');
     _initializedDevices.add(deviceId);
 
-    await stopScan(); // 先停掃，提高連線穩定度
+    // await stopScan(); // 先停掃，提高連線穩定度
 
     final completer = Completer<void>();
 
@@ -305,7 +330,8 @@ class BleService {
           if (!completer.isCompleted) completer.complete();
 
           // 重新掃描
-          await Future.delayed(const Duration(milliseconds: 500));
+          await Future.delayed(const Duration(seconds: 3));
+          if (!_isScanning) await restartScan();
           if (!_isScanning) await startScan();
         }
       } else if (update.connectionState == DeviceConnectionState.disconnected) {
@@ -335,8 +361,11 @@ class BleService {
   // ------- 尋找特徵 -------
   Future<({QualifiedCharacteristic wr, QualifiedCharacteristic rdFw})?>
   _findCharacteristics(String deviceId) async {
+    debugPrint('deviceId: $deviceId');
     final services = await _ble.discoverServices(deviceId);
     QualifiedCharacteristic? wr, rdFw;
+
+    debugPrint('servicesAAA: $services');
 
     for (final s in services) {
       for (final c in s.characteristics) {
@@ -425,6 +454,8 @@ class BleService {
   // ------- 解析廣播：只用 bit-field -------
   BleDeviceData? _parseManufacturerData(DiscoveredDevice device) {
     final mfr = device.manufacturerData;
+    print("test123 manufacturerData: ${device.manufacturerData}");
+    print('test123 manufacturerData(hex): ${toHexList(mfr)}');
     if (mfr.isEmpty) return null;
 
     // 找看起來像 bit-field 時間的切片（同時嘗試 big/little）
@@ -433,22 +464,52 @@ class BleService {
     if (guess != null) {
       timestamp = guess.time;
       debugPrint(
-          '⏱️ bit-field 時間 @off=${guess.offset}, endian=${guess.endian}, value(UTC)=$timestamp, bytes(hex)=${_hex(mfr.sublist(guess.offset, guess.offset + 4))}');
+          '⏱️ bit-field 時間 @off=${guess.offset}, endian=${guess.endian}, value=$timestamp, bytes(hex)=${_hex(mfr.sublist(guess.offset, guess.offset + 4))}');
     } else {
       debugPrint('⏱️ 廣播未找到可解的 bit-field 時間');
     }
 
-    // 其他欄位（電壓/溫度/電流）保持你原本的猜測邏輯
+    // 其他欄位（固定位置解析）
     double? voltage;
-    final voltCandidates = _findVoltageCandidates(mfr);
-    if (voltCandidates.isNotEmpty) voltage = voltCandidates.first.v;
-
     double? temperature;
-    final tempCandidates = _findTempCandidates(mfr);
-    if (tempCandidates.isNotEmpty) temperature = tempCandidates.first.c;
 
-    final currentCandidates = _findCurrentCandidates(mfr);
-    final currents = currentCandidates.map((e) => e.mA).toList();
+    // 電流維持List回傳（若想只回傳單點，可改成單值）
+    final rawCurrents = <double>[];
+
+    // 假設已有 _safeU16 為 big-endian： (hi<<8)|lo
+    int _safeU16(List<int> m, int hiIndex) {
+      if (hiIndex < 0 || hiIndex + 1 >= m.length) return -1;
+      return (m[hiIndex] << 8) | m[hiIndex + 1];
+    }
+
+    // 取電流 [4..5] → mA = raw / 10.0
+    final rawCurrent = _safeU16(mfr, 4);
+    if (rawCurrent >= 0) {
+      final current_mA = rawCurrent / 10.0;
+      rawCurrents.add(current_mA);
+      debugPrint('⚡ current raw=0x${rawCurrent.toRadixString(16)} -> ${current_mA.toStringAsFixed(1)} mA');
+    }
+
+    // 取溫度 [6..7] → °C = raw / 100.0
+    final rawTemp = _safeU16(mfr, 6);
+    if (rawTemp >= 0) {
+      temperature = rawTemp / 100.0;
+      debugPrint('🌡️ temp raw=0x${rawTemp.toRadixString(16)} -> ${temperature.toStringAsFixed(2)} °C');
+    }
+
+    // 取電壓 [8..9] → V = raw / 1000.0
+    final rawVolt = _safeU16(mfr, 8);
+    if (rawVolt >= 0) {
+      voltage = rawVolt / 1000.0;
+      debugPrint('🔋 volt raw=0x${rawVolt.toRadixString(16)} -> ${voltage.toStringAsFixed(3)} V');
+    }
+
+    print('test123 rawCurrents: $rawCurrents');
+
+    final current = calculateCurrent(rawCurrents);
+    final currents = [current];
+
+    print('test123 currents: $currents');
 
     return BleDeviceData(
       id: device.id,
@@ -462,43 +523,35 @@ class BleService {
     );
   }
 
-  // ------- 小工具：U16 / 找候選（維持你原本啟發式） -------
-  int _u16(List<int> m, int off, {required bool be}) {
-    if (off + 1 >= m.length) return -1;
-    return be ? ((m[off] << 8) | m[off + 1]) : ((m[off + 1] << 8) | m[off]);
-  }
+  //轉換電流值
+  double calculateCurrent(List<double> currents) {
+    String functionName = "calculateCurrent()";
+    try {
+      // 電路參數
+      double R1 = 2.00E6;
+      double R2 = 88.7E3;
+      double R3 = 100.00E3;
+      double R4 = 2.00E6;
+      double V_09 = 0.9000;  // V_0.9
+      double TIR_Inp = V_09; // TIR_In+
 
-  List<({int hi, int lo, double v})> _findVoltageCandidates(List<int> m) {
-    final out = <({int hi, int lo, double v})>[];
-    for (int i = 0; i < m.length - 1; i++) {
-      final raw = _u16(m, i, be: true);
-      if (raw < 0) continue;
-      final v = raw / 1000.0;
-      if (v >= 2.5 && v <= 4.5) out.add((hi: i, lo: i + 1, v: v));
-    }
-    return out.take(5).toList();
-  }
+      if (currents.isEmpty) {
+        throw Exception("currents 陣列為空");
+      }
 
-  List<({int hi, int lo, double c})> _findTempCandidates(List<int> m) {
-    final out = <({int hi, int lo, double c})>[];
-    for (int i = 0; i < m.length - 1; i++) {
-      final raw = _u16(m, i, be: true);
-      if (raw < 0) continue;
-      final c = raw / 100.0;
-      if (c >= -40 && c <= 125) out.add((hi: i, lo: i + 1, c: c));
-    }
-    return out.take(5).toList();
-  }
+      // 取第一個值 (假設單位是 mV，要轉 V)
+      double V_out = currents.first / 1000.0; // 2356.2 mV → 2.3562 V
 
-  List<({int hi, int lo, double mA})> _findCurrentCandidates(List<int> m) {
-    final out = <({int hi, int lo, double mA})>[];
-    for (int i = 0; i < m.length - 1; i++) {
-      final raw = _u16(m, i, be: true);
-      if (raw <= 0) continue;
-      final mA = raw / 10.0;
-      if (mA >= 0 && mA <= 20000) out.add((hi: i, lo: i + 1, mA: mA));
+      // 計算公式
+      double V_In_N = (V_out - V_09) / (R3 + R4) * R3 + V_09;
+      double V_TIR  = V_In_N + (V_In_N / R1) * R2;
+      double result = (V_TIR - TIR_Inp) / 20E6; // 電流 (A)
+
+      return result;
+    } catch (error) {
+      debugPrint(">> log : [catch] - $functionName, $error");
+      return -1;
     }
-    return out.take(10).toList();
   }
 
   // ------- 資源釋放 -------
@@ -506,5 +559,43 @@ class BleService {
     _scanSub?.cancel();
     _connSub?.cancel();
     _deviceDataController.close();
+  }
+
+  /// 將 List<int>/Uint8List 轉成十六進位清單樣式：[C0, AD, 00, 5A, ...]
+  String toHexList(Iterable<int> bytes, {bool withBrackets = true}) {
+    final hex = bytes
+        .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
+        .join(', ');
+    return withBrackets ? '[$hex]' : hex;
+  }
+
+  /// 十六進位轉回位元組（支援 "C0 AD 00", "C0,AD,00", "0xC0 0xAD" 等）
+  List<int> parseHexList(String s) {
+    final cleaned = s
+        .replaceAll('[', '')
+        .replaceAll(']', '')
+        .replaceAll('0x', '')
+        .replaceAll(',', ' ')
+        .trim();
+    if (cleaned.isEmpty) return <int>[];
+    return cleaned
+        .split(RegExp(r'\s+'))
+        .where((t) => t.isNotEmpty)
+        .map((t) => int.parse(t, radix: 16))
+        .toList(growable: false);
+  }
+
+  /// 進階：hexdump（每行 16 bytes，帶位移）
+  String hexDump(Iterable<int> bytes, {int width = 16}) {
+    final b = bytes.toList();
+    final buf = StringBuffer();
+    for (int off = 0; off < b.length; off += width) {
+      final chunk = b.skip(off).take(width);
+      final hex = chunk
+          .map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase())
+          .join(' ');
+      buf.writeln(off.toRadixString(16).padLeft(4, '0').toUpperCase() + ': ' + hex);
+    }
+    return buf.toString();
   }
 }

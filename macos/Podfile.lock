@@ -9,6 +9,8 @@ PODS:
     - FlutterMacOS
   - location (0.0.1):
     - FlutterMacOS
+  - mobile_scanner (5.2.3):
+    - FlutterMacOS
   - path_provider_foundation (0.0.1):
     - Flutter
     - FlutterMacOS
@@ -29,6 +31,7 @@ DEPENDENCIES:
   - FlutterMacOS (from `Flutter/ephemeral`)
   - isar_flutter_libs (from `Flutter/ephemeral/.symlinks/plugins/isar_flutter_libs/macos`)
   - location (from `Flutter/ephemeral/.symlinks/plugins/location/macos`)
+  - mobile_scanner (from `Flutter/ephemeral/.symlinks/plugins/mobile_scanner/macos`)
   - path_provider_foundation (from `Flutter/ephemeral/.symlinks/plugins/path_provider_foundation/darwin`)
   - reactive_ble_mobile (from `Flutter/ephemeral/.symlinks/plugins/reactive_ble_mobile/darwin`)
   - shared_preferences_foundation (from `Flutter/ephemeral/.symlinks/plugins/shared_preferences_foundation/darwin`)
@@ -49,6 +52,8 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/isar_flutter_libs/macos
   location:
     :path: Flutter/ephemeral/.symlinks/plugins/location/macos
+  mobile_scanner:
+    :path: Flutter/ephemeral/.symlinks/plugins/mobile_scanner/macos
   path_provider_foundation:
     :path: Flutter/ephemeral/.symlinks/plugins/path_provider_foundation/darwin
   reactive_ble_mobile:
@@ -62,6 +67,7 @@ SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
   isar_flutter_libs: 43385c99864c168fadba7c9adeddc5d38838ca6a
   location: 7cdb0665bd6577d382b0a343acdadbcb7f964775
+  mobile_scanner: 0a05256215b047af27b9495db3b77640055e8824
   path_provider_foundation: 2b6b4c569c0fb62ec74538f866245ac84301af46
   Protobuf: 164aea2ae380c3951abdc3e195220c01d17400e0
   reactive_ble_mobile: 856183aeda09f2a676bbaecbea8915c3cb1d33df

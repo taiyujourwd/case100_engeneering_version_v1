@@ -36,6 +36,31 @@ class MeasureRepository {
     return (s?.seq ?? 0, s?.dayKey);
   }
 
+  // 新增：單一樣本寫入方法（用於 BLE 即時數據）
+  Future<void> addSample(Sample sample) async {
+    await _isar.writeTxn(() async {
+      await _isar.samples.put(sample);
+
+      // 更新 DayIndex
+      final idx = await _isar.dayIndexs
+          .filter()
+          .deviceIdEqualTo(sample.deviceId)
+          .and()
+          .dayKeyEqualTo(sample.dayKey)
+          .findFirst();
+
+      if (idx == null) {
+        await _isar.dayIndexs.put(DayIndex()
+          ..deviceId = sample.deviceId
+          ..dayKey = sample.dayKey
+          ..count = 1);
+      } else {
+        idx.count += 1;
+        await _isar.dayIndexs.put(idx);
+      }
+    });
+  }
+
   Future<void> appendSamples(String deviceId, Iterable<Sample> samples) async {
     await _isar.writeTxn(() async {
       await _isar.samples.putAll(samples.toList());
@@ -91,20 +116,21 @@ class MeasureRepository {
   }
 }
 
-Sample makeSample({
+// 新增：從 BleDeviceData 建立 Sample（用於 BLE 即時數據）
+Sample makeSampleFromBle({
   required String deviceId,
-  required int seq,
-  double? v,
-  double? i,
-  double? glu,
-  required DateTime ts,
+  required DateTime timestamp,
+  required List<double> currents,
+  double? voltage,
+  double? temperature,
 }) {
   return Sample()
     ..deviceId = deviceId
-    ..seq = seq
-    ..voltage = v
-    ..current = i
-    ..glucose = glu
-    ..ts = ts
-    ..dayKey = dayKeyOf(ts);
+    ..seq = timestamp.millisecondsSinceEpoch // 使用時間戳記作為序號
+    ..voltage = voltage
+    ..current = currents.isNotEmpty ? currents.first : null // 使用第一個電流值
+    ..currents = currents // 儲存所有電流值
+    ..temperature = temperature
+    ..ts = timestamp
+    ..dayKey = dayKeyOf(timestamp);
 }

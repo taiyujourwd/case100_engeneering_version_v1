@@ -1,9 +1,15 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../measure/ble/ble_adapter.dart';
 import '../measure/ble/reactive_ble_client.dart';
 import '../measure/data/measure_repository.dart';
 import 'ble/ble_service.dart';
 import 'models/ble_device.dart';
+
+Future<String> _loadDeviceName() async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getString('device_name').toString();
+}
 
 final bleClientProvider = Provider<BleClient>((ref) => ReactiveBleClient());
 
@@ -28,5 +34,14 @@ final bleDeviceDataStreamProvider = StreamProvider<BleDeviceData>((ref) {
   return bleService.deviceDataStream;
 });
 
-// 目標裝置名稱 Provider
-final targetDeviceNameProvider = StateProvider<String>((ref) => '');
+// 初始化（讀取 SharedPreferences）
+final targetDeviceNameFutureProvider = FutureProvider<String?>((ref) async => await _loadDeviceName());
+
+// 實際使用的狀態
+final targetDeviceNameProvider = StateProvider<String>((ref) {
+  final asyncValue = ref.watch(targetDeviceNameFutureProvider);
+  return asyncValue.maybeWhen(
+    data: (name) => name ?? '',
+    orElse: () => '', // 預設空字串
+  );
+});

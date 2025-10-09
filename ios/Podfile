@@ -1,43 +1,43 @@
-# Uncomment this line to define a global platform for your project
-# platform :ios, '13.0'
+platform :ios, '14.0'
+install! 'cocoapods', :deterministic_uuids => false
 
-# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
-ENV['COCOAPODS_DISABLE_STATS'] = 'true'
-
-project 'Runner', {
-  'Debug' => :debug,
-  'Profile' => :release,
-  'Release' => :release,
-}
-
-def flutter_root
-  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
-  unless File.exist?(generated_xcode_build_settings_path)
-    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+def resolve_flutter_root
+  root = ENV['FLUTTER_ROOT']
+  return root unless root.nil? || root.empty?
+  machine = `flutter --version --machine 2>/dev/null`
+  if $?.success? && machine && machine.include?('"flutterRoot"')
+    match = machine.match(/"flutterRoot"\s*:\s*"([^"]+)"/)
+    return match[1] if match
   end
-
-  File.foreach(generated_xcode_build_settings_path) do |line|
-    matches = line.match(/FLUTTER_ROOT\=(.*)/)
-    return matches[1].strip if matches
-  end
-  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+  raise 'Unable to resolve FLUTTER_ROOT. Set ENV FLUTTER_ROOT or ensure `flutter` is on PATH.'
 end
+flutter_root = resolve_flutter_root
+require File.expand_path('packages/flutter_tools/bin/podhelper', flutter_root)
 
-require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
-
-flutter_ios_podfile_setup
+use_frameworks! :linkage => :static
 
 target 'Runner' do
-  use_frameworks!
+  use_frameworks! :linkage => :static
+  use_modular_headers!
 
+  flutter_ios_podfile_setup
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
-  target 'RunnerTests' do
-    inherit! :search_paths
-  end
 end
 
 post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    flutter_additional_ios_build_settings(target)
+  # 統一所有 Pods 的 Deployment Target 到 14.0
+  installer.pods_project.targets.each do |t|
+    t.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
+    end
+  end
+
+  # 兼容新舊 Flutter
+  if defined?(flutter_post_install)
+    flutter_post_install(installer)
+  else
+    installer.pods_project.targets.each do |t|
+      flutter_additional_ios_build_settings(t)
+    end
   end
 end

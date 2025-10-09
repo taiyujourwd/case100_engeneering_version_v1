@@ -22,33 +22,43 @@ const SampleSchema = CollectionSchema(
       name: r'current',
       type: IsarType.double,
     ),
-    r'dayKey': PropertySchema(
+    r'currents': PropertySchema(
       id: 1,
+      name: r'currents',
+      type: IsarType.doubleList,
+    ),
+    r'dayKey': PropertySchema(
+      id: 2,
       name: r'dayKey',
       type: IsarType.string,
     ),
     r'deviceId': PropertySchema(
-      id: 2,
+      id: 3,
       name: r'deviceId',
       type: IsarType.string,
     ),
     r'glucose': PropertySchema(
-      id: 3,
+      id: 4,
       name: r'glucose',
       type: IsarType.double,
     ),
     r'seq': PropertySchema(
-      id: 4,
+      id: 5,
       name: r'seq',
       type: IsarType.long,
     ),
+    r'temperature': PropertySchema(
+      id: 6,
+      name: r'temperature',
+      type: IsarType.double,
+    ),
     r'ts': PropertySchema(
-      id: 5,
+      id: 7,
       name: r'ts',
       type: IsarType.dateTime,
     ),
     r'voltage': PropertySchema(
-      id: 6,
+      id: 8,
       name: r'voltage',
       type: IsarType.double,
     )
@@ -73,6 +83,12 @@ int _sampleEstimateSize(
   Map<Type, List<int>> allOffsets,
 ) {
   var bytesCount = offsets.last;
+  {
+    final value = object.currents;
+    if (value != null) {
+      bytesCount += 3 + value.length * 8;
+    }
+  }
   bytesCount += 3 + object.dayKey.length * 3;
   bytesCount += 3 + object.deviceId.length * 3;
   return bytesCount;
@@ -85,12 +101,14 @@ void _sampleSerialize(
   Map<Type, List<int>> allOffsets,
 ) {
   writer.writeDouble(offsets[0], object.current);
-  writer.writeString(offsets[1], object.dayKey);
-  writer.writeString(offsets[2], object.deviceId);
-  writer.writeDouble(offsets[3], object.glucose);
-  writer.writeLong(offsets[4], object.seq);
-  writer.writeDateTime(offsets[5], object.ts);
-  writer.writeDouble(offsets[6], object.voltage);
+  writer.writeDoubleList(offsets[1], object.currents);
+  writer.writeString(offsets[2], object.dayKey);
+  writer.writeString(offsets[3], object.deviceId);
+  writer.writeDouble(offsets[4], object.glucose);
+  writer.writeLong(offsets[5], object.seq);
+  writer.writeDouble(offsets[6], object.temperature);
+  writer.writeDateTime(offsets[7], object.ts);
+  writer.writeDouble(offsets[8], object.voltage);
 }
 
 Sample _sampleDeserialize(
@@ -101,13 +119,15 @@ Sample _sampleDeserialize(
 ) {
   final object = Sample();
   object.current = reader.readDoubleOrNull(offsets[0]);
-  object.dayKey = reader.readString(offsets[1]);
-  object.deviceId = reader.readString(offsets[2]);
-  object.glucose = reader.readDoubleOrNull(offsets[3]);
+  object.currents = reader.readDoubleList(offsets[1]);
+  object.dayKey = reader.readString(offsets[2]);
+  object.deviceId = reader.readString(offsets[3]);
+  object.glucose = reader.readDoubleOrNull(offsets[4]);
   object.id = id;
-  object.seq = reader.readLong(offsets[4]);
-  object.ts = reader.readDateTime(offsets[5]);
-  object.voltage = reader.readDoubleOrNull(offsets[6]);
+  object.seq = reader.readLong(offsets[5]);
+  object.temperature = reader.readDoubleOrNull(offsets[6]);
+  object.ts = reader.readDateTime(offsets[7]);
+  object.voltage = reader.readDoubleOrNull(offsets[8]);
   return object;
 }
 
@@ -121,16 +141,20 @@ P _sampleDeserializeProp<P>(
     case 0:
       return (reader.readDoubleOrNull(offset)) as P;
     case 1:
-      return (reader.readString(offset)) as P;
+      return (reader.readDoubleList(offset)) as P;
     case 2:
       return (reader.readString(offset)) as P;
     case 3:
-      return (reader.readDoubleOrNull(offset)) as P;
+      return (reader.readString(offset)) as P;
     case 4:
-      return (reader.readLong(offset)) as P;
+      return (reader.readDoubleOrNull(offset)) as P;
     case 5:
-      return (reader.readDateTime(offset)) as P;
+      return (reader.readLong(offset)) as P;
     case 6:
+      return (reader.readDoubleOrNull(offset)) as P;
+    case 7:
+      return (reader.readDateTime(offset)) as P;
+    case 8:
       return (reader.readDoubleOrNull(offset)) as P;
     default:
       throw IsarError('Unknown property with id $propertyId');
@@ -300,6 +324,169 @@ extension SampleQueryFilter on QueryBuilder<Sample, Sample, QFilterCondition> {
         includeUpper: includeUpper,
         epsilon: epsilon,
       ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsIsNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(const FilterCondition.isNull(
+        property: r'currents',
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsIsNotNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(const FilterCondition.isNotNull(
+        property: r'currents',
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsElementEqualTo(
+    double value, {
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'currents',
+        value: value,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition>
+      currentsElementGreaterThan(
+    double value, {
+    bool include = false,
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        include: include,
+        property: r'currents',
+        value: value,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsElementLessThan(
+    double value, {
+    bool include = false,
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.lessThan(
+        include: include,
+        property: r'currents',
+        value: value,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsElementBetween(
+    double lower,
+    double upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.between(
+        property: r'currents',
+        lower: lower,
+        includeLower: includeLower,
+        upper: upper,
+        includeUpper: includeUpper,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsLengthEqualTo(
+      int length) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(
+        r'currents',
+        length,
+        true,
+        length,
+        true,
+      );
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(
+        r'currents',
+        0,
+        true,
+        0,
+        true,
+      );
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(
+        r'currents',
+        0,
+        false,
+        999999,
+        true,
+      );
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsLengthLessThan(
+    int length, {
+    bool include = false,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(
+        r'currents',
+        0,
+        true,
+        length,
+        include,
+      );
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsLengthGreaterThan(
+    int length, {
+    bool include = false,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(
+        r'currents',
+        length,
+        include,
+        999999,
+        true,
+      );
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> currentsLengthBetween(
+    int lower,
+    int upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.listLength(
+        r'currents',
+        lower,
+        includeLower,
+        upper,
+        includeUpper,
+      );
     });
   }
 
@@ -745,6 +932,84 @@ extension SampleQueryFilter on QueryBuilder<Sample, Sample, QFilterCondition> {
     });
   }
 
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> temperatureIsNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(const FilterCondition.isNull(
+        property: r'temperature',
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> temperatureIsNotNull() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(const FilterCondition.isNotNull(
+        property: r'temperature',
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> temperatureEqualTo(
+    double? value, {
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'temperature',
+        value: value,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> temperatureGreaterThan(
+    double? value, {
+    bool include = false,
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        include: include,
+        property: r'temperature',
+        value: value,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> temperatureLessThan(
+    double? value, {
+    bool include = false,
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.lessThan(
+        include: include,
+        property: r'temperature',
+        value: value,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterFilterCondition> temperatureBetween(
+    double? lower,
+    double? upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    double epsilon = Query.epsilon,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.between(
+        property: r'temperature',
+        lower: lower,
+        includeLower: includeLower,
+        upper: upper,
+        includeUpper: includeUpper,
+        epsilon: epsilon,
+      ));
+    });
+  }
+
   QueryBuilder<Sample, Sample, QAfterFilterCondition> tsEqualTo(
       DateTime value) {
     return QueryBuilder.apply(this, (query) {
@@ -942,6 +1207,18 @@ extension SampleQuerySortBy on QueryBuilder<Sample, Sample, QSortBy> {
     });
   }
 
+  QueryBuilder<Sample, Sample, QAfterSortBy> sortByTemperature() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'temperature', Sort.asc);
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterSortBy> sortByTemperatureDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'temperature', Sort.desc);
+    });
+  }
+
   QueryBuilder<Sample, Sample, QAfterSortBy> sortByTs() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'ts', Sort.asc);
@@ -1040,6 +1317,18 @@ extension SampleQuerySortThenBy on QueryBuilder<Sample, Sample, QSortThenBy> {
     });
   }
 
+  QueryBuilder<Sample, Sample, QAfterSortBy> thenByTemperature() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'temperature', Sort.asc);
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QAfterSortBy> thenByTemperatureDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'temperature', Sort.desc);
+    });
+  }
+
   QueryBuilder<Sample, Sample, QAfterSortBy> thenByTs() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'ts', Sort.asc);
@@ -1072,6 +1361,12 @@ extension SampleQueryWhereDistinct on QueryBuilder<Sample, Sample, QDistinct> {
     });
   }
 
+  QueryBuilder<Sample, Sample, QDistinct> distinctByCurrents() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'currents');
+    });
+  }
+
   QueryBuilder<Sample, Sample, QDistinct> distinctByDayKey(
       {bool caseSensitive = true}) {
     return QueryBuilder.apply(this, (query) {
@@ -1095,6 +1390,12 @@ extension SampleQueryWhereDistinct on QueryBuilder<Sample, Sample, QDistinct> {
   QueryBuilder<Sample, Sample, QDistinct> distinctBySeq() {
     return QueryBuilder.apply(this, (query) {
       return query.addDistinctBy(r'seq');
+    });
+  }
+
+  QueryBuilder<Sample, Sample, QDistinct> distinctByTemperature() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'temperature');
     });
   }
 
@@ -1124,6 +1425,12 @@ extension SampleQueryProperty on QueryBuilder<Sample, Sample, QQueryProperty> {
     });
   }
 
+  QueryBuilder<Sample, List<double>?, QQueryOperations> currentsProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'currents');
+    });
+  }
+
   QueryBuilder<Sample, String, QQueryOperations> dayKeyProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'dayKey');
@@ -1145,6 +1452,12 @@ extension SampleQueryProperty on QueryBuilder<Sample, Sample, QQueryProperty> {
   QueryBuilder<Sample, int, QQueryOperations> seqProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'seq');
+    });
+  }
+
+  QueryBuilder<Sample, double?, QQueryOperations> temperatureProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'temperature');
     });
   }
 
@@ -1182,8 +1495,13 @@ const DayIndexSchema = CollectionSchema(
       name: r'dayKey',
       type: IsarType.string,
     ),
-    r'deviceId': PropertySchema(
+    r'deviceDayKey': PropertySchema(
       id: 2,
+      name: r'deviceDayKey',
+      type: IsarType.string,
+    ),
+    r'deviceId': PropertySchema(
+      id: 3,
       name: r'deviceId',
       type: IsarType.string,
     )
@@ -1193,7 +1511,26 @@ const DayIndexSchema = CollectionSchema(
   deserialize: _dayIndexDeserialize,
   deserializeProp: _dayIndexDeserializeProp,
   idName: r'id',
-  indexes: {},
+  indexes: {
+    r'deviceDayKey_dayKey': IndexSchema(
+      id: -5089604450316884032,
+      name: r'deviceDayKey_dayKey',
+      unique: false,
+      replace: false,
+      properties: [
+        IndexPropertySchema(
+          name: r'deviceDayKey',
+          type: IndexType.hash,
+          caseSensitive: true,
+        ),
+        IndexPropertySchema(
+          name: r'dayKey',
+          type: IndexType.hash,
+          caseSensitive: true,
+        )
+      ],
+    )
+  },
   links: {},
   embeddedSchemas: {},
   getId: _dayIndexGetId,
@@ -1209,6 +1546,7 @@ int _dayIndexEstimateSize(
 ) {
   var bytesCount = offsets.last;
   bytesCount += 3 + object.dayKey.length * 3;
+  bytesCount += 3 + object.deviceDayKey.length * 3;
   bytesCount += 3 + object.deviceId.length * 3;
   return bytesCount;
 }
@@ -1221,7 +1559,8 @@ void _dayIndexSerialize(
 ) {
   writer.writeLong(offsets[0], object.count);
   writer.writeString(offsets[1], object.dayKey);
-  writer.writeString(offsets[2], object.deviceId);
+  writer.writeString(offsets[2], object.deviceDayKey);
+  writer.writeString(offsets[3], object.deviceId);
 }
 
 DayIndex _dayIndexDeserialize(
@@ -1233,7 +1572,7 @@ DayIndex _dayIndexDeserialize(
   final object = DayIndex();
   object.count = reader.readLong(offsets[0]);
   object.dayKey = reader.readString(offsets[1]);
-  object.deviceId = reader.readString(offsets[2]);
+  object.deviceId = reader.readString(offsets[3]);
   object.id = id;
   return object;
 }
@@ -1250,6 +1589,8 @@ P _dayIndexDeserializeProp<P>(
     case 1:
       return (reader.readString(offset)) as P;
     case 2:
+      return (reader.readString(offset)) as P;
+    case 3:
       return (reader.readString(offset)) as P;
     default:
       throw IsarError('Unknown property with id $propertyId');
@@ -1339,6 +1680,96 @@ extension DayIndexQueryWhere on QueryBuilder<DayIndex, DayIndex, QWhereClause> {
         upper: upperId,
         includeUpper: includeUpper,
       ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterWhereClause>
+      deviceDayKeyEqualToAnyDayKey(String deviceDayKey) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(IndexWhereClause.equalTo(
+        indexName: r'deviceDayKey_dayKey',
+        value: [deviceDayKey],
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterWhereClause>
+      deviceDayKeyNotEqualToAnyDayKey(String deviceDayKey) {
+    return QueryBuilder.apply(this, (query) {
+      if (query.whereSort == Sort.asc) {
+        return query
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [],
+              upper: [deviceDayKey],
+              includeUpper: false,
+            ))
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [deviceDayKey],
+              includeLower: false,
+              upper: [],
+            ));
+      } else {
+        return query
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [deviceDayKey],
+              includeLower: false,
+              upper: [],
+            ))
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [],
+              upper: [deviceDayKey],
+              includeUpper: false,
+            ));
+      }
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterWhereClause> deviceDayKeyDayKeyEqualTo(
+      String deviceDayKey, String dayKey) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addWhereClause(IndexWhereClause.equalTo(
+        indexName: r'deviceDayKey_dayKey',
+        value: [deviceDayKey, dayKey],
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterWhereClause>
+      deviceDayKeyEqualToDayKeyNotEqualTo(String deviceDayKey, String dayKey) {
+    return QueryBuilder.apply(this, (query) {
+      if (query.whereSort == Sort.asc) {
+        return query
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [deviceDayKey],
+              upper: [deviceDayKey, dayKey],
+              includeUpper: false,
+            ))
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [deviceDayKey, dayKey],
+              includeLower: false,
+              upper: [deviceDayKey],
+            ));
+      } else {
+        return query
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [deviceDayKey, dayKey],
+              includeLower: false,
+              upper: [deviceDayKey],
+            ))
+            .addWhereClause(IndexWhereClause.between(
+              indexName: r'deviceDayKey_dayKey',
+              lower: [deviceDayKey],
+              upper: [deviceDayKey, dayKey],
+              includeUpper: false,
+            ));
+      }
     });
   }
 }
@@ -1523,6 +1954,140 @@ extension DayIndexQueryFilter
     return QueryBuilder.apply(this, (query) {
       return query.addFilterCondition(FilterCondition.greaterThan(
         property: r'dayKey',
+        value: '',
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition> deviceDayKeyEqualTo(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'deviceDayKey',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition>
+      deviceDayKeyGreaterThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        include: include,
+        property: r'deviceDayKey',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition> deviceDayKeyLessThan(
+    String value, {
+    bool include = false,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.lessThan(
+        include: include,
+        property: r'deviceDayKey',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition> deviceDayKeyBetween(
+    String lower,
+    String upper, {
+    bool includeLower = true,
+    bool includeUpper = true,
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.between(
+        property: r'deviceDayKey',
+        lower: lower,
+        includeLower: includeLower,
+        upper: upper,
+        includeUpper: includeUpper,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition>
+      deviceDayKeyStartsWith(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.startsWith(
+        property: r'deviceDayKey',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition> deviceDayKeyEndsWith(
+    String value, {
+    bool caseSensitive = true,
+  }) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.endsWith(
+        property: r'deviceDayKey',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition> deviceDayKeyContains(
+      String value,
+      {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.contains(
+        property: r'deviceDayKey',
+        value: value,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition> deviceDayKeyMatches(
+      String pattern,
+      {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.matches(
+        property: r'deviceDayKey',
+        wildcard: pattern,
+        caseSensitive: caseSensitive,
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition>
+      deviceDayKeyIsEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.equalTo(
+        property: r'deviceDayKey',
+        value: '',
+      ));
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterFilterCondition>
+      deviceDayKeyIsNotEmpty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addFilterCondition(FilterCondition.greaterThan(
+        property: r'deviceDayKey',
         value: '',
       ));
     });
@@ -1742,6 +2307,18 @@ extension DayIndexQuerySortBy on QueryBuilder<DayIndex, DayIndex, QSortBy> {
     });
   }
 
+  QueryBuilder<DayIndex, DayIndex, QAfterSortBy> sortByDeviceDayKey() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'deviceDayKey', Sort.asc);
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterSortBy> sortByDeviceDayKeyDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'deviceDayKey', Sort.desc);
+    });
+  }
+
   QueryBuilder<DayIndex, DayIndex, QAfterSortBy> sortByDeviceId() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'deviceId', Sort.asc);
@@ -1778,6 +2355,18 @@ extension DayIndexQuerySortThenBy
   QueryBuilder<DayIndex, DayIndex, QAfterSortBy> thenByDayKeyDesc() {
     return QueryBuilder.apply(this, (query) {
       return query.addSortBy(r'dayKey', Sort.desc);
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterSortBy> thenByDeviceDayKey() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'deviceDayKey', Sort.asc);
+    });
+  }
+
+  QueryBuilder<DayIndex, DayIndex, QAfterSortBy> thenByDeviceDayKeyDesc() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addSortBy(r'deviceDayKey', Sort.desc);
     });
   }
 
@@ -1821,6 +2410,13 @@ extension DayIndexQueryWhereDistinct
     });
   }
 
+  QueryBuilder<DayIndex, DayIndex, QDistinct> distinctByDeviceDayKey(
+      {bool caseSensitive = true}) {
+    return QueryBuilder.apply(this, (query) {
+      return query.addDistinctBy(r'deviceDayKey', caseSensitive: caseSensitive);
+    });
+  }
+
   QueryBuilder<DayIndex, DayIndex, QDistinct> distinctByDeviceId(
       {bool caseSensitive = true}) {
     return QueryBuilder.apply(this, (query) {
@@ -1846,6 +2442,12 @@ extension DayIndexQueryProperty
   QueryBuilder<DayIndex, String, QQueryOperations> dayKeyProperty() {
     return QueryBuilder.apply(this, (query) {
       return query.addPropertyName(r'dayKey');
+    });
+  }
+
+  QueryBuilder<DayIndex, String, QQueryOperations> deviceDayKeyProperty() {
+    return QueryBuilder.apply(this, (query) {
+      return query.addPropertyName(r'deviceDayKey');
     });
   }
 

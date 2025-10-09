@@ -1,9 +1,13 @@
-// lib/features/measure/screens/measure_screen.dart
+import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/settings_dialog.dart';
+import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/smoothing_settings_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../../common/utils/date_key.dart';
 import '../data/isar_schemas.dart';
+import '../data/measure_repository.dart';
 import '../providers.dart';
+import '../screens/qu_scan_screen.dart';
 import 'widgets/glucose_chart.dart';
 import 'measure_detail_screen.dart';
 
@@ -18,31 +22,104 @@ class MeasureScreen extends ConsumerStatefulWidget {
 class _MeasureScreenState extends ConsumerState<MeasureScreen> {
   late String _dayKey;
   int _navIndex = 0;
+  String? _scannedDeviceName; // 儲存掃描的設備名稱
+  Future<List<String?>>? _navigationFuture; // 緩存 future
+
 
   @override
   void initState() {
     super.initState();
     _dayKey = dayKeyOf(DateTime.now());
+    _loadScannedDevice(); // 載入已掃描的設備
+  }
+
+  // 載入已掃描的設備名稱
+  Future<void> _loadScannedDevice() async {
+    final prefs = await SharedPreferences.getInstance();
+    final deviceName = prefs.getString('scanned_device_name');
+    if (deviceName != null) {
+      setState(() => _scannedDeviceName = deviceName);
+    }
+  }
+
+  // 處理 QR 掃描
+  Future<void> _handleQrScan() async {
+    final result = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const QrScanScreen()),
+    );
+
+    if (result != null) {
+      setState(() => _scannedDeviceName = result);
+      _toast('已掃描設備：$result');
+    }
+  }
+
+  void _showSmoothingDialog() async {
+    final result = await showSmoothingDialog(context);
+
+    if (result != null) {
+      if (result.method == 1) {
+        _toast('已套用 Smooth 1：Order=${result.smooth1Order}');
+      } else {
+        _toast('已套用 Smooth 2：Error=${result.smooth2Error}%、Order=${result.smooth2Order}');
+      }
+    }
+  }
+
+  void _showSettingsDialog() async {
+    final result = await showSettingsDialog(context);
+
+    if (result != null) {
+      if (result.method == 1) {
+        _toast('連線模式:BroadCast、slope=${result.slope}、intercept:=${result.intercept}');
+      } else {
+        _toast('連線模式:Connection、slope=${result.slope}、intercept:=${result.intercept}');
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final repoAsync = ref.watch(repoProvider);
-    print("test123 repoAsync: $repoAsync");
     final bleConnected = ref.watch(bleConnectionStateProvider);
 
     // 監聽 BLE 數據流
     ref.listen(bleDeviceDataStreamProvider, (previous, next) {
-      next.whenData((data) {
-        debugPrint('📊 收到 BLE 數據：'
-            '電壓=${data.voltage}V, '
-            '溫度=${data.temperature}°C, '
-            '電流數=${data.currents.length}, '
-            '電流=${data.currents}'
-            '時間=${data.timestamp},'
-            'RAW DATA=${data.rawData}');
-        // TODO: 將數據寫入 repository
-        // 例如: ref.read(repoProvider).value?.addSample(...)
+      next.whenData((data) async {
+        debugPrint('📊 收到 BLE 數據：\n'
+            '電壓=${data.voltage}V,\n'
+            '溫度=${data.temperature}°C,\n'
+            '電流數=${data.currents.length},\n'
+            '電流=${data.currents},\n'
+            '時間=${data.timestamp},\n'
+            'RAW DATA=${data.rawData}\n');
+
+
+        // 獲取 repository
+        final repo = await ref.read(repoProvider.future);
+
+        // 轉換並儲存資料
+        if (data.timestamp != null &&
+            data.timestamp!.year == DateTime.now().year &&
+            data.currents.isNotEmpty) {
+          final sample = makeSampleFromBle(
+            deviceId: widget.deviceId,
+            timestamp: data.timestamp!,
+            currents: data.currents,
+            voltage: data.voltage,
+            temperature: data.temperature,
+          );
+
+          debugPrint('sampleAA: $sample');
+
+          try {
+            await repo.addSample(sample);
+            debugPrint('✅ 資料已寫入：時間=${sample.ts}, 電流筆數=${sample.currents?.length}');
+          } catch (e) {
+            debugPrint('❌ 寫入失敗：$e');
+          }
+        }
       });
     });
 
@@ -58,13 +135,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text('Potentiostat - CEMS100'),
-                  const SizedBox(width: 8),
-                  // BLE 連線狀態指示器
-                  Icon(
-                    bleConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-                    color: bleConnected ? Colors.green : Colors.grey,
-                    size: 20,
-                  ),
                 ],
               ),
             ),
@@ -78,17 +148,13 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                       _handleBleConnection();
                       break;
                     case 'qr':
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('QR 掃瞄')),
-                      );
+                      _handleQrScan();
                       break;
                     case 'smooth':
-                      _showSmoothingSheet();
+                      _showSmoothingDialog();
                       break;
                     case 'settings':
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('設定')),
-                      );
+                      _showSettingsDialog();
                       break;
                   }
                 },
@@ -114,20 +180,19 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                 return Column(
                   children: [
                     Expanded(
-                      child: InteractiveViewer(
-                        child: GlucoseChart(samples: list),
-                      ),
+                      child: GlucoseChart(samples: list), //曲線圖,
                     ),
                     const SizedBox(height: 8),
-                    FutureBuilder<List<String?>>(  // 明確指定泛型型別
-                      future: Future.wait<String?>([  // 給 Future.wait 加上泛型
+                    FutureBuilder<List<String?>>(
+                      key: ValueKey(_dayKey), // 在 _dayKey 改變時重新創建
+                      future:Future.wait<String?>([  // ✅ 直接創建 future，不需要緩存
                         repo.prevDayWithData(widget.deviceId, _dayKey),
                         repo.nextDayWithData(widget.deviceId, _dayKey),
                       ]),
                       builder: (context, s2) {
-                        if (!s2.hasData) return const SizedBox(height: 48);
-                        final prev = s2.data![0];  // 不需要 as String? 因為已經有型別了
-                        final next = s2.data![1];
+                        // 即使沒有數據也顯示按鈕（只是禁用）
+                        final prev = s2.hasData ? s2.data![0] : null;
+                        final next = s2.hasData ? s2.data![1] : null;
                         return Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
                           children: [
@@ -193,30 +258,53 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
           error: (e, _) => Center(child: Text('初始化失敗：$e')),
         ),
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _navIndex,
-        type: BottomNavigationBarType.fixed,
-        onTap: _onNavTapped,
-        items: const [
-          BottomNavigationBarItem(
-            icon: Icon(Icons.bluetooth),
-            label: '藍芽',
-            tooltip: '藍芽連線/裝置管理',
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // 顯示掃描的設備名稱
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+            color: Colors.blue[50],
+            child: Text(
+              '設備：${ref.read(targetDeviceNameProvider.notifier).state}',
+              textAlign: TextAlign.center,
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.qr_code_scanner),
-            label: '掃瞄',
-            tooltip: '掃描裝置 QR Code',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.tune),
-            label: '平滑',
-            tooltip: '平滑處理/濾波設定',
-          ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.settings),
-            label: '設定',
-            tooltip: '系統設定',
+          BottomNavigationBar(
+            currentIndex: _navIndex,
+            type: BottomNavigationBarType.fixed,
+            onTap: _onNavTapped,
+            items: [
+              BottomNavigationBarItem(
+                icon: Icon(
+                  bleConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
+                  color: bleConnected ? Colors.green : Colors.grey,
+                  size: 20,
+                ),
+                label: '藍芽',
+                tooltip: '藍芽連線/裝置管理',
+              ),
+              const BottomNavigationBarItem(
+                icon: Icon(Icons.qr_code_scanner),
+                label: '掃瞄',
+                tooltip: '掃描裝置 QR Code',
+              ),
+              const BottomNavigationBarItem(
+                icon: Icon(Icons.tune),
+                label: '平滑',
+                tooltip: '平滑處理/濾波設定',
+              ),
+              const BottomNavigationBarItem(
+                icon: Icon(Icons.settings),
+                label: '設定',
+                tooltip: '系統設定',
+              ),
+            ],
           ),
         ],
       ),
@@ -232,15 +320,15 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
         break;
 
       case 1: // QR Code 掃瞄
-        _toast('開啟 QR Code 掃瞄');
+        await _handleQrScan();
         break;
 
       case 2: // 平滑處理
-        _showSmoothingSheet();
+        _showSmoothingDialog();
         break;
 
       case 3: // 設定
-        _toast('開啟設定');
+        _showSettingsDialog();
         break;
     }
   }
@@ -254,6 +342,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
       await bleService.stopScan();
       ref.read(bleConnectionStateProvider.notifier).state = false;
       _toast('已停止藍芽掃描');
+      debugPrint('已停止藍芽掃描');
     } else {
       // 顯示裝置名稱輸入對話框
       final deviceName = await _showDeviceNameDialog();
@@ -262,17 +351,19 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
         await bleService.startScan(targetName: deviceName.isEmpty ? null : deviceName);
         ref.read(bleConnectionStateProvider.notifier).state = true;
         _toast('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
+        debugPrint('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
       }
     }
   }
 
-  Future<String?> _showDeviceNameDialog() async {
-    // final controller = TextEditingController(
-    //   text: ref.read(targetDeviceNameProvider),
-    // );
+  Future<void> _saveDeviceName(String deviceName) async {
+    final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('device_name', deviceName);
+  }
 
+  Future<String?> _showDeviceNameDialog() async {
     final controller = TextEditingController(
-      text: 'PSA00163',
+      text: ref.read(targetDeviceNameProvider.notifier).state,
     );
 
     return showDialog<String>(
@@ -282,9 +373,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
         content: TextField(
           controller: controller,
           decoration: const InputDecoration(
-            labelText: '裝置名稱（選填）',
+            labelText: '裝置名稱（必填）',
             hintText: '例如：PSA00163',
-            helperText: '留空以掃描所有裝置',
           ),
         ),
         actions: [
@@ -293,7 +383,14 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
             child: const Text('取消'),
           ),
           ElevatedButton(
-            onPressed: () => Navigator.pop(context, controller.text),
+            onPressed: () {
+              if (controller.text.isEmpty) {
+                _toast('請輸入產品名稱...');
+              } else {
+                _saveDeviceName(controller.text);
+                Navigator.pop(context, controller.text);
+              }
+            },
             child: const Text('確定'),
           ),
         ],
@@ -307,82 +404,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
         content: Text(msg),
         duration: const Duration(milliseconds: 800),
       ),
-    );
-  }
-
-  void _showSmoothingSheet() {
-    showModalBottomSheet(
-        context: context,
-        showDragHandle: true,
-        builder: (ctx) {
-          double alpha = 0.2;
-          int window = 5;
-          return StatefulBuilder(
-              builder: (context, setState) {
-                return Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                      const Text(
-                      '平滑處理設定',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                        const Text('指數平滑 α'),
-                    Slider(
-                      value: alpha,
-                      min: 0.0,
-                      max: 1.0,
-                      divisions: 100,
-                      label: alpha.toStringAsFixed(2),
-                      onChanged: (v) => setState(() => alpha = v),
-                    ),
-                        ],
-                    ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            const Text('移動平均視窗'),
-                            Slider(
-                              value: window.toDouble(),
-                              min: 3,
-                              max: 21,
-                              divisions: 9,
-                              label: window.toString(),
-                              onChanged: (v) => setState(() => window = v.round()),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(context),
-                              child: const Text('取消'),
-                            ),
-                            const SizedBox(width: 8),
-                            ElevatedButton(
-                              onPressed: () {
-                                // TODO: 將參數寫入狀態管理
-                                Navigator.pop(context);
-                                _toast('已套用平滑：α=${alpha.toStringAsFixed(2)}、視窗=$window');
-                              },
-                              child: const Text('套用'),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                      ],
-                    ),
-                );
-              },
-          );
-        },
     );
   }
 

@@ -1,12 +1,12 @@
 class BleDeviceData {
-  final String id;
-  final String name;
-  final int rssi;
-  final DateTime? timestamp;
-  final double? voltage;
-  final double? temperature;
-  final List<double> currents;
-  final List<int> rawData;
+  final String id; //device ID
+  final String name; //設備名稱
+  final int rssi; //接收信號強度
+  final DateTime? timestamp; //時間戳記
+  final double? voltage; //電壓
+  final double? temperature; //溫度
+  final List<double> currents; //電流
+  final List<int> rawData; // 原始資料
 
   const BleDeviceData({
     required this.id,
