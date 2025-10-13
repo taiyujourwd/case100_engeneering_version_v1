@@ -34,20 +34,22 @@ dependencies:
   fl_chart: ^0.68.0
   flutter_reactive_ble: ^5.0.3
   flutter_blue_plus: ^2.0.0
-  isar:
-    hosted:
-      name: isar
-      url: https://pub.isar-community.dev/
-    version: ^3.1.0+2
-  isar_flutter_libs:
-    hosted:
-      name: isar_flutter_libs
-      url: https://pub.isar-community.dev/
-    version: ^3.1.0+2
+  isar: ^3.1.0+1
+  isar_flutter_libs: ^3.1.0+1
+#  isar:
+#    hosted:
+#      name: isar
+#      url: https://pub.isar-community.dev/
+#    version: ^3.1.0+2
+#  isar_flutter_libs:
+#    hosted:
+#      name: isar_flutter_libs
+#      url: https://pub.isar-community.dev/
+#    version: ^3.1.0+2
   path_provider: ^2.1.4
   collection: ^1.18.0
   workmanager: ^0.9.0+3
-  flutter_foreground_task: ^6.4.0
+  flutter_foreground_task: ^9.1.0
   connectivity_plus: ^6.0.5
   mobile_scanner: ^5.2.3
   shared_preferences: ^2.2.2
@@ -61,12 +63,13 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  isar_generator:
-    hosted:
-      name: isar_generator
-      url: https://pub.isar-community.dev/
-    version: ^3.1.0+2
-  build_runner: ^2.4.11
+#  isar_generator:
+#    hosted:
+#      name: isar_generator
+#      url: https://pub.isar-community.dev/
+#    version: ^3.1.0+2
+  isar_generator: ^3.1.0+1
+  build_runner: any
 
   # The "flutter_lints" package below contains a set of recommended lints to
   # encourage good coding practices. The lint set provided by the package is

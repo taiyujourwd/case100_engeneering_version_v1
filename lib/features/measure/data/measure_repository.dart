@@ -13,7 +13,11 @@ class MeasureRepository {
   static Future<MeasureRepository> create(BleClient ble) async {
     final repo = MeasureRepository(ble);
     final dir = await getApplicationSupportDirectory();
-    repo._isar = await Isar.open([SampleSchema, DayIndexSchema], directory: dir.path);
+    repo._isar = await Isar.open(
+      [SampleSchema, DayIndexSchema],
+      directory: dir.path,
+      inspector: true,
+    );
     return repo;
   }
 

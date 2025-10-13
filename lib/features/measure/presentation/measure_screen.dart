@@ -13,8 +13,7 @@ import 'widgets/glucose_chart.dart';
 import 'measure_detail_screen.dart';
 
 class MeasureScreen extends ConsumerStatefulWidget {
-  final String deviceId;
-  const MeasureScreen({super.key, required this.deviceId});
+  const MeasureScreen({super.key});
 
   @override
   ConsumerState<MeasureScreen> createState() => _MeasureScreenState();
@@ -133,7 +132,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
             data.timestamp!.year == DateTime.now().year &&
             data.currents.isNotEmpty) {
           final sample = makeSampleFromBle(
-            deviceId: widget.deviceId,
+            deviceId: ref.read(targetDeviceNameProvider.notifier).state,
             timestamp: data.timestamp!,
             currents: data.currents,
             voltage: data.voltage,
@@ -201,7 +200,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
       body: SafeArea(
         child: repoAsync.when(
           data: (repo) {
-            final dayStream = repo.watchDay(widget.deviceId, _dayKey);
+            final dayStream = repo.watchDay(ref.read(targetDeviceNameProvider.notifier).state, _dayKey);
             return StreamBuilder<List<Sample>>(
               stream: dayStream,
               builder: (context, snap) {
@@ -215,8 +214,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                     FutureBuilder<List<String?>>(
                       key: ValueKey(_dayKey), // 在 _dayKey 改變時重新創建
                       future:Future.wait<String?>([  // ✅ 直接創建 future，不需要緩存
-                        repo.prevDayWithData(widget.deviceId, _dayKey),
-                        repo.nextDayWithData(widget.deviceId, _dayKey),
+                        repo.prevDayWithData(ref.read(targetDeviceNameProvider.notifier).state, _dayKey),
+                        repo.nextDayWithData(ref.read(targetDeviceNameProvider.notifier).state, _dayKey),
                       ]),
                       builder: (context, s2) {
                         // 即使沒有數據也顯示按鈕（只是禁用）
@@ -232,7 +231,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                                 Navigator.of(context).push(
                                   MaterialPageRoute(
                                     builder: (_) => MeasureDetailScreen(
-                                      deviceId: widget.deviceId,
+                                      deviceId: ref.read(targetDeviceNameProvider.notifier).state,
                                       dayKey: prev,
                                     ),
                                   ),
@@ -265,7 +264,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                                 Navigator.of(context).push(
                                   MaterialPageRoute(
                                     builder: (_) => MeasureDetailScreen(
-                                      deviceId: widget.deviceId,
+                                      deviceId: ref.read(targetDeviceNameProvider.notifier).state,
                                       dayKey: next,
                                     ),
                                   ),

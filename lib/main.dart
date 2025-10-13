@@ -8,6 +8,9 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await startForeground();       // Android: 前景服務（iOS 自動忽略）
   await schedulePeriodicSync();  // 定期 Wi‑Fi 上傳（留白）
+
+
+
   runApp(const ProviderScope(child: MyApp()));
 }
 
@@ -17,7 +20,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      home: const MeasureScreen(deviceId: 'PSA00163'),
+      home: const MeasureScreen(),
     );
   }
 }

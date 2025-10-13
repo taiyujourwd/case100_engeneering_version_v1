@@ -14,9 +14,8 @@ Future<void> startForeground() async {
       showNotification: true, // iOS 仍需填入選項
       playSound: false,
     ),
-    foregroundTaskOptions: const ForegroundTaskOptions(
-      interval: 15000,
-      isOnceEvent: false,
+    foregroundTaskOptions: ForegroundTaskOptions(
+      eventAction: ForegroundTaskEventAction.repeat(15000), // 毫秒
       autoRunOnBoot: true,
     ),
   );

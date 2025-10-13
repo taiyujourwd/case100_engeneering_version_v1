@@ -74,7 +74,7 @@ const SampleSchema = CollectionSchema(
   getId: _sampleGetId,
   getLinks: _sampleGetLinks,
   attach: _sampleAttach,
-  version: '3.1.8',
+  version: '3.1.0+1',
 );
 
 int _sampleEstimateSize(
@@ -1536,7 +1536,7 @@ const DayIndexSchema = CollectionSchema(
   getId: _dayIndexGetId,
   getLinks: _dayIndexGetLinks,
   attach: _dayIndexAttach,
-  version: '3.1.8',
+  version: '3.1.0+1',
 );
 
 int _dayIndexEstimateSize(
