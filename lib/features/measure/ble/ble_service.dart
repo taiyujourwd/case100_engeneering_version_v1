@@ -468,8 +468,6 @@ class BleService {
   // ------- 解析廣播：只用 bit-field -------
   BleDeviceData? _parseManufacturerData(DiscoveredDevice device) {
     final mfr = device.manufacturerData;
-    print("test123 manufacturerData: ${device.manufacturerData}");
-    print('test123 manufacturerData(hex): ${toHexList(mfr)}');
     if (mfr.isEmpty) return null;
 
     // 找看起來像 bit-field 時間的切片（同時嘗試 big/little）
@@ -518,12 +516,8 @@ class BleService {
       debugPrint('🔋 volt raw=0x${rawVolt.toRadixString(16)} -> ${voltage.toStringAsFixed(3)} V');
     }
 
-    print('test123 rawCurrents: $rawCurrents');
-
     final current = calculateCurrent(rawCurrents);
     final currents = [current];
-
-    print('test123 currents: $currents');
 
     return BleDeviceData(
       id: device.id,

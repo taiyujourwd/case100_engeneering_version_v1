@@ -1,16 +1,18 @@
+import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/correction_params_provider.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/device_info_providers.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/settings_dialog.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/smoothing_settings_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
 import '../../../common/utils/date_key.dart';
 import '../data/isar_schemas.dart';
 import '../data/measure_repository.dart';
-import 'providers/ble_providers.dart';
 import '../screens/qu_scan_screen.dart';
-import 'widgets/glucose_chart.dart';
 import 'measure_detail_screen.dart';
+import 'providers/ble_providers.dart';
+import 'widgets/glucose_chart.dart';
 
 class MeasureScreen extends ConsumerStatefulWidget {
   const MeasureScreen({super.key});
@@ -23,7 +25,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
   late String _dayKey;
   int _navIndex = 0;
   String? _scannedDeviceName; // 儲存掃描的設備名稱
-  Future<List<String?>>? _navigationFuture; // 緩存 future
 
 
   @override
@@ -101,6 +102,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
   Widget build(BuildContext context) {
     final repoAsync = ref.watch(repoProvider);
     final bleConnected = ref.watch(bleConnectionStateProvider);
+    final params = ref.watch(correctionParamsProvider);
 
     // ✅ 監聽版本號更新
     ref.listen(bleDeviceVersionStreamProvider, (previous, next) {
@@ -172,25 +174,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                 icon: const Icon(Icons.more_vert),
                 onSelected: (value) {
                   switch (value) {
-                    case 'ble':
-                      _handleBleConnection();
+                    case 'deviceConfig':
+                      _showDeviceNameDialog();
                       break;
-                    case 'qr':
+                    case 'fileExport':
                       _handleQrScan();
-                      break;
-                    case 'smooth':
-                      _showSmoothingDialog();
-                      break;
-                    case 'settings':
-                      _showSettingsDialog();
                       break;
                   }
                 },
                 itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'ble', child: Text('藍芽連線')),
-                  PopupMenuItem(value: 'qr', child: Text('QR Code 掃瞄')),
-                  PopupMenuItem(value: 'smooth', child: Text('平滑處理')),
-                  PopupMenuItem(value: 'settings', child: Text('設定')),
+                  PopupMenuItem(value: 'deviceConfig', child: Text('手動設定設備')),
+                  PopupMenuItem(value: 'fileExport', child: Text('檔案匯出')),
                 ],
               ),
             ),
@@ -208,7 +202,11 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                 return Column(
                   children: [
                     Expanded(
-                      child: GlucoseChart(samples: list), //曲線圖,
+                      child: GlucoseChart(
+                        samples: list,
+                        slope: params.slope,
+                        intercept: params.intercept,
+                      ), //曲線圖,
                     ),
                     const SizedBox(height: 8),
                     FutureBuilder<List<String?>>(

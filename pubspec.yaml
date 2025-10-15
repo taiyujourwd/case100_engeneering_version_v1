@@ -32,8 +32,10 @@ dependencies:
     sdk: flutter
   flutter_riverpod: ^2.5.1
   fl_chart: ^0.68.0
+#  flutter_blue_plus: ^2.0.0
   flutter_reactive_ble: ^5.0.3
-  flutter_blue_plus: ^2.0.0
+  flutter_foreground_task: ^8.0.0
+  permission_handler: ^12.0.1
   isar: ^3.1.0+1
   isar_flutter_libs: ^3.1.0+1
 #  isar:
@@ -49,7 +51,6 @@ dependencies:
   path_provider: ^2.1.4
   collection: ^1.18.0
   workmanager: ^0.9.0+3
-  flutter_foreground_task: ^9.1.0
   connectivity_plus: ^6.0.5
   mobile_scanner: ^5.2.3
   shared_preferences: ^2.2.2
@@ -57,7 +58,6 @@ dependencies:
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
-  permission_handler: ^11.0.1
   location: ^5.0.3
 
 dev_dependencies:

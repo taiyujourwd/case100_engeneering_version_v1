@@ -1,8 +1,15 @@
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/current_dialog.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'glucose_dialog.dart';
+
+// ✅ 重要：確保這個 import 路徑正確
+// 請根據你的項目結構調整路徑
+// 例如：import '../providers/correction_params_provider.dart';
+// 或：import 'package:your_package/features/measure/presentation/providers/correction_params_provider.dart';
+import '../providers/correction_params_provider.dart';
 
 class SettingResult {
   final int method; // 1 for BroadCast, 2 for Connection
@@ -34,14 +41,16 @@ Future<SettingResult?> showSettingsDialog(BuildContext context) async {
   return result; // null 表示 Exit
 }
 
-class SettingsDialog extends StatefulWidget {
+// ✅ 改為 ConsumerStatefulWidget
+class SettingsDialog extends ConsumerStatefulWidget {
   const SettingsDialog({super.key});
 
   @override
-  State<SettingsDialog> createState() => _SettingsDialogState();
+  ConsumerState<SettingsDialog> createState() => _SettingsDialogState();
 }
 
-class _SettingsDialogState extends State<SettingsDialog> {
+// ✅ 改為 ConsumerState
+class _SettingsDialogState extends ConsumerState<SettingsDialog> {
   bool _isBroadcast = true; // true: BroadCast, false: Connection
   final TextEditingController _slopeController = TextEditingController();
   final TextEditingController _interceptController = TextEditingController();
@@ -82,21 +91,55 @@ class _SettingsDialogState extends State<SettingsDialog> {
   }
 
   Future<void> _loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _isBroadcast = prefs.getBool('connection_mode_broadcast') ?? true;
-      _slopeController.text =
-          prefs.getString('correction_slope') ?? '600.000';
-      _interceptController.text =
-          prefs.getString('correction_intercept') ?? '0.000';
-    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      // ✅ 從 Provider 讀取當前值
+      // 注意：這裡假設 correctionParamsProvider 是 StateNotifierProvider
+      // 如果你的 provider 返回 AsyncValue，請查看下面的註釋
+      final params = ref.read(correctionParamsProvider);
+
+      setState(() {
+        _isBroadcast = prefs.getBool('connection_mode_broadcast') ?? true;
+
+        // 使用 Provider 的值作為初始值
+        _slopeController.text = params.slope.toStringAsFixed(1);
+        _interceptController.text = params.intercept.toStringAsFixed(1);
+      });
+
+      print('📋 Loaded settings - slope: ${params.slope}, intercept: ${params.intercept}');
+    } catch (e) {
+      print('❌ Error loading settings: $e');
+
+      // 如果出錯，直接從 SharedPreferences 讀取
+      final prefs = await SharedPreferences.getInstance();
+      setState(() {
+        _isBroadcast = prefs.getBool('connection_mode_broadcast') ?? true;
+        _slopeController.text = prefs.getString('correction_slope') ?? '600.000';
+        _interceptController.text = prefs.getString('correction_intercept') ?? '0.000';
+      });
+    }
   }
 
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
+
+    // 1. 保存連接模式
     await prefs.setBool('connection_mode_broadcast', _isBroadcast);
-    await prefs.setString('correction_slope', _slopeController.text);
-    await prefs.setString('correction_intercept', _interceptController.text);
+
+    // 2. 解析 slope 和 intercept
+    final slope = double.tryParse(_slopeController.text.trim());
+    final intercept = double.tryParse(_interceptController.text.trim());
+
+    if (slope != null && intercept != null) {
+      // 3. ✅ 關鍵：更新 Provider（這會立即通知所有監聽者）
+      await ref.read(correctionParamsProvider.notifier)
+          .updateParams(slope, intercept);
+
+      print('✅ Settings saved - slope: $slope, intercept: $intercept');
+    } else {
+      _toast('請輸入有效的數值');
+    }
   }
 
   SettingResult _createSettingResult() {
@@ -136,7 +179,6 @@ class _SettingsDialogState extends State<SettingsDialog> {
       child: SafeArea(
         child: ConstrainedBox(
           constraints: const BoxConstraints(
-            // 不硬塞 500 寬，最多 500，否則依外部約束縮小
             maxWidth: 500,
           ),
           child: Padding(
@@ -155,7 +197,7 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   ),
                   const SizedBox(height: 16),
 
-                  // BroadCast / Connection Toggle（用 Wrap 避免橫向爆）
+                  // BroadCast / Connection Toggle
                   Wrap(
                     spacing: 12,
                     runSpacing: 12,
@@ -187,15 +229,15 @@ class _SettingsDialogState extends State<SettingsDialog> {
                   ),
                   const SizedBox(height: 20),
 
-                  // 僅保留你要的兩顆功能 + Apply/Exit
+                  // 功能按鈕
                   Column(
                     children: [
                       Row(
                         children: [
                           Expanded(
                             child: _buildActionButton(
-                              'Set Scale by 濃度',
-                              onPressed: _showGlucoseDialog
+                                'Set Scale by 濃度',
+                                onPressed: _showGlucoseDialog
                             ),
                           ),
                         ],
@@ -205,8 +247,8 @@ class _SettingsDialogState extends State<SettingsDialog> {
                         children: [
                           Expanded(
                             child: _buildActionButton(
-                              'Set Scale by 電流',
-                              onPressed: _showCurrentDialog
+                                'Set Scale by 電流',
+                                onPressed: _showCurrentDialog
                             ),
                           ),
                         ],
