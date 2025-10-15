@@ -121,25 +121,43 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // 方法選擇按鈕
-            Row(
-              children: [
-                Expanded(
-                  child: _buildMethodButton(
-                    label: 'Smooth 1',
-                    isSelected: _selectedMethod == 1,
-                    onTap: () => setState(() => _selectedMethod = 1),
-                  ),
+            // 下拉選單
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: Colors.grey.shade300,
+                  width: 2,
                 ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: _buildMethodButton(
-                    label: 'Smooth 2',
-                    isSelected: _selectedMethod == 2,
-                    onTap: () => setState(() => _selectedMethod = 2),
-                  ),
+              ),
+              child: DropdownButton<int>(
+                value: _selectedMethod,
+                isExpanded: true,
+                underline: const SizedBox(),
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black,
                 ),
-              ],
+                icon: Icon(Icons.arrow_drop_down, color: Colors.grey.shade700),
+                items: const [
+                  DropdownMenuItem(
+                    value: 1,
+                    child: Text('Smooth 1'),
+                  ),
+                  DropdownMenuItem(
+                    value: 2,
+                    child: Text('Smooth 2'),
+                  ),
+                ],
+                onChanged: (value) {
+                  if (value != null) {
+                    setState(() => _selectedMethod = value);
+                  }
+                },
+              ),
             ),
 
             const SizedBox(height: 24),
@@ -172,37 +190,6 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
               ],
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMethodButton({
-    required String label,
-    required bool isSelected,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFFDD835) : Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: isSelected ? const Color(0xFFFDD835) : Colors.grey.shade300,
-            width: 2,
-          ),
-        ),
-        child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
-              color: isSelected ? Colors.black : Colors.grey.shade600,
-            ),
-          ),
         ),
       ),
     );

@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <!-- 藍牙權限 -->
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
@@ -15,7 +17,12 @@
 
     <!-- 前景服務權限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- ✅ 開機自啟動 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- 喚醒鎖定 -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -42,7 +49,7 @@
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:permission="android.permission.FOREGROUND_SERVICE"
             android:exported="false"
-            android:foregroundServiceType="location|connectedDevice|dataSync" />
+            android:foregroundServiceType="connectedDevice|dataSync" />
 
         <!-- 這個是 flutter_foreground_task 需要的 NotificationReceiver -->
         <receiver

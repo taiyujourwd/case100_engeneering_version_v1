@@ -1,15 +1,17 @@
+import 'dart:async';
+
 import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/correction_params_provider.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/device_info_providers.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/settings_dialog.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/smoothing_settings_dialog.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_foreground_task/models/service_request_result.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import '../../../common/utils/date_key.dart';
+import '../ble/ble_connection_mode.dart';
 import '../data/isar_schemas.dart';
-import '../data/measure_repository.dart';
 import '../foreground/foreground_ble_service.dart';
 import '../screens/qu_scan_screen.dart';
 import 'measure_detail_screen.dart';
@@ -27,6 +29,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
   late String _dayKey;
   int _navIndex = 0;
   String? _scannedDeviceName; // 儲存掃描的設備名稱
+  Timer? _serviceMonitor;  // 服務監控計時器
 
 
   @override
@@ -35,7 +38,86 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     _dayKey = dayKeyOf(DateTime.now());
     _loadScannedDevice(); // 載入已掃描的設備
     _loadDeviceInfo();
+
+    // ✅ 使用 addTaskDataCallback 而不是直接監聽 receivePort
+    _setupDataCallback();
+
+    _initForegroundService();
     _checkForegroundServiceStatus(); // 檢查前景服務狀態
+  }
+
+  void _setupDataCallback() {
+    debugPrint('🔧 [UI] 設置 data callback...');
+
+    // 移除之前可能存在的回調
+    FlutterForegroundTask.removeTaskDataCallback(_handleForegroundData);
+
+    // 添加新的回調
+    FlutterForegroundTask.addTaskDataCallback(_handleForegroundData);
+
+    debugPrint('✅ [UI] data callback 設置完成');
+  }
+
+  // ✅ 處理來自 foreground service 的數據
+  void _handleForegroundData(dynamic data) {
+    debugPrint('📬 [UI] 收到原始訊息: $data');
+
+    if (!mounted) {
+      debugPrint('⚠️ [UI] Widget 未 mounted');
+      return;
+    }
+
+    if (data is Map) {
+      final type = data['type'];
+      debugPrint('📦 [UI] 訊息類型: $type');
+
+      switch (type) {
+        case 'version':
+          final version = data['version'] as String?;
+          if (version != null && version.isNotEmpty) {
+            debugPrint('✅ [UI] 收到版本號: $version');
+
+            // 更新狀態
+            if (mounted) {
+              setState(() {
+                ref.read(targetDeviceVersionProvider.notifier).state = version;
+              });
+            }
+          }
+          break;
+
+        case 'stopping':
+          FgGuards.stopping = true;
+          break;
+
+        case 'heartbeat':
+        // 處理心跳
+          break;
+
+        case 'data':
+          debugPrint('📊 [UI] 前景服務數據: ${data['deviceName']}');
+          break;
+
+        case 'error':
+          if (mounted) {
+            _toast(data['message'] ?? '發生錯誤');
+          }
+          break;
+      }
+    } else {
+      debugPrint('⚠️ [UI] 收到非 Map 類型訊息: ${data.runtimeType}');
+    }
+  }
+
+  // ✅ 初始化前景服務方法
+  Future<void> _initForegroundService() async {
+    await ForegroundBleService.init();
+
+    // 檢查服務是否已在運行
+    final isRunning = await ForegroundBleService.isRunning();
+    if (isRunning) {
+      ref.read(bleConnectionStateProvider.notifier).state = true;
+    }
   }
 
   // 檢查前景服務狀態
@@ -44,11 +126,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     if (isRunning) {
       ref.read(bleConnectionStateProvider.notifier).state = true;
       _toast('前景服務運行中');
-
-      // 重新設定接收端口
-      ForegroundBleService.receivePort((data) {
-        // 處理數據
-      });
     }
   }
 
@@ -91,6 +168,48 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     }
   }
 
+  Future<void> _saveDeviceName(String deviceName) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('device_name', deviceName);
+  }
+
+  Future<String?> _showDeviceNameDialog() async {
+    final controller = TextEditingController(
+      text: ref.read(targetDeviceNameProvider.notifier).state,
+    );
+
+    return showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('藍芽裝置設定'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(
+            labelText: '裝置名稱（必填）',
+            hintText: '例如：PSA00163',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (controller.text.isEmpty) {
+                _toast('請輸入產品名稱...');
+              } else {
+                _saveDeviceName(controller.text);
+                Navigator.pop(context, controller.text);
+              }
+            },
+            child: const Text('確定'),
+          ),
+        ],
+      ),
+    );
+  }
+
   void _showSmoothingDialog() async {
     final result = await showSmoothingDialog(context);
 
@@ -115,60 +234,254 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     }
   }
 
+  void _onNavTapped(int index) async {
+    setState(() => _navIndex = index);
+
+    switch (index) {
+      case 0: // 藍芽
+        _handleBleConnection();
+        break;
+
+      case 1: // QR Code 掃瞄
+        await _handleQrScan();
+        break;
+
+      case 2: // 平滑處理
+        _showSmoothingDialog();
+        break;
+
+      case 3: // 設定
+        _showSettingsDialog();
+        break;
+    }
+  }
+
+  void _showPermissionDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('需要權限'),
+        content: const Text(
+          '藍芽功能需要以下權限：\n\n'
+              '• 藍芽掃描\n'
+              '• 藍芽連線\n'
+              '• 位置資訊（Android 藍芽掃描需要）\n\n'
+              '請在設定中授予這些權限。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              // 開啟應用設定頁面
+              await openAppSettings();
+            },
+            child: const Text('前往設定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ✅ 請求電池優化豁免
+  Future<void> _requestBatteryOptimizationExemption() async {
+    debugPrint('🔋 檢查電池優化狀態...');
+
+    final status = await Permission.ignoreBatteryOptimizations.status;
+
+    if (!status.isGranted) {
+      debugPrint('⚠️ 需要請求電池優化豁免');
+
+      final shouldRequest = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('電池優化設定'),
+          content: const Text(
+            '為了讓藍芽服務能持續運行（最長 14 天），需要關閉電池優化。\n\n'
+                '這不會大幅增加耗電，但能確保服務不被系統終止。',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('允許'),
+            ),
+          ],
+        ),
+      );
+
+      if (shouldRequest == true) {
+        final result = await Permission.ignoreBatteryOptimizations.request();
+        if (result.isGranted) {
+          debugPrint('✅ 電池優化豁免已授予');
+          _toast('已關閉電池優化');
+        } else {
+          debugPrint('❌ 電池優化豁免被拒絕');
+          _toast('建議關閉電池優化以確保服務穩定運行');
+        }
+      }
+    } else {
+      debugPrint('✅ 電池優化已關閉');
+    }
+  }
+
+  // 啟動服務監控，自動重啟
+  void _startServiceMonitoring() {
+    _serviceMonitor?.cancel();
+
+    debugPrint('👀 [UI] 開始監控服務狀態...');
+
+    _serviceMonitor = Timer.periodic(const Duration(seconds: 10), (timer) async {
+      final isRunning = await ForegroundBleService.isRunning();
+      final shouldBeRunning = ref.read(bleConnectionStateProvider);
+
+      if (!isRunning && shouldBeRunning) {
+        debugPrint('⚠️ [UI] 檢測到服務已停止，嘗試重啟...');
+
+        // 檢查是否是被系統終止
+        final prefs = await SharedPreferences.getInstance();
+        final wasTerminated = prefs.getBool('service_terminated') ?? false;
+
+        if (wasTerminated) {
+          debugPrint('🔄 [UI] 服務被系統終止，執行重啟...');
+          await prefs.setBool('service_terminated', false);
+
+          // 重新啟動服務
+          final modeIndex = prefs.getInt('ble_connection_mode') ?? 0;
+          final mode = BleConnectionMode.values[modeIndex];
+          final deviceName = prefs.getString('device_name');
+          final deviceId = prefs.getString('target_device_id');
+
+          if (deviceName != null && deviceName.isNotEmpty) {
+            final success = await ForegroundBleService.start(
+              targetDeviceId: deviceId,
+              targetDeviceName: deviceName,
+              mode: mode,
+            );
+
+            if (success) {
+              debugPrint('✅ [UI] 服務重啟成功');
+              _toast('藍芽服務已自動重啟');
+            } else {
+              debugPrint('❌ [UI] 服務重啟失敗');
+              _toast('服務重啟失敗，請手動重新連線');
+              ref.read(bleConnectionStateProvider.notifier).state = false;
+              timer.cancel();
+            }
+          }
+        }
+      }
+    });
+  }
+
+  void _handleBleConnection() async {
+    final bleService = ref.read(bleServiceProvider);
+    final isConnected = ref.read(bleConnectionStateProvider);
+
+    if (isConnected) {
+      // ✅ 停止監控
+      _serviceMonitor?.cancel();
+
+      // 停止前景服務
+      final success = await ForegroundBleService.stopSafely();
+
+      if (success) {
+        ref.read(bleConnectionStateProvider.notifier).state = false;
+        _toast('已停止藍芽監聽');
+        debugPrint('已停止藍芽監聽');
+      } else {
+        _toast('停止服務失敗');
+      }
+    } else {
+      // ✅ 步驟 1：請求電池優化豁免
+      await _requestBatteryOptimizationExemption();
+
+      // ✅ 步驟 2：先在主線程中請求權限
+      debugPrint('📋 開始請求藍芽權限...');
+      final hasPermission = await bleService.requestPermissions();
+
+      if (!hasPermission) {
+        _toast('藍芽權限不足，請在設定中授予權限');
+        debugPrint('❌ 藍芽權限未全數授予');
+        _showPermissionDialog();
+        return;
+      }
+
+      debugPrint('✅ 藍芽權限已授予');
+
+      // ✅ 步驟 3：讀取連線模式和設備資訊
+      final prefs = await SharedPreferences.getInstance();
+      final modeIndex = prefs.getInt('ble_connection_mode') ?? 0;
+      final mode = BleConnectionMode.values[modeIndex];
+
+      String? deviceName = prefs.getString('device_name');
+      String? deviceId = prefs.getString('target_device_id');
+
+      if (deviceName == null || deviceName.isEmpty) {
+        deviceName = await _showDeviceNameDialog();
+        if (deviceName == null) return;
+      }
+
+      final modeText = mode == BleConnectionMode.broadcast ? '廣播' : '連線';
+      debugPrint('🎯 準備啟動前景服務：模式=$modeText, 設備=$deviceName');
+
+      // ✅ 步驟 4：啟動前景服務
+      final success = await ForegroundBleService.start(
+        targetDeviceId: deviceId,
+        targetDeviceName: deviceName,
+        mode: mode,
+      );
+
+      if (success) {
+        ref.read(targetDeviceNameProvider.notifier).state = deviceName;
+        ref.read(bleConnectionStateProvider.notifier).state = true;
+        _toast('藍芽前景服務已啟動（$modeText 模式）：$deviceName');
+        debugPrint('✅ 藍芽前景服務已啟動');
+
+        // ✅ 步驟 5：啟動服務監控
+        _startServiceMonitoring();
+      } else {
+        _toast('前景服務啟動失敗');
+        debugPrint('❌ 前景服務啟動失敗');
+      }
+    }
+  }
+
+  void _toast(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        duration: const Duration(milliseconds: 800),
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    // ✅ 停止服務監控
+    _serviceMonitor?.cancel();
+
+    // ✅ 清理回調
+    FlutterForegroundTask.removeTaskDataCallback(_handleForegroundData);
+
+    // ✅ 停止 BLE 掃描
+    final bleService = ref.read(bleServiceProvider);
+    bleService.stopScan();
+
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final repoAsync = ref.watch(repoProvider);
     final bleConnected = ref.watch(bleConnectionStateProvider);
     final params = ref.watch(correctionParamsProvider);
-
-    // ✅ 監聽版本號更新
-    ref.listen(bleDeviceVersionStreamProvider, (previous, next) {
-      next.whenData((version) {
-        if (version.isNotEmpty) {
-          ref.read(targetDeviceVersionProvider.notifier).state = version;
-          debugPrint('✅ UI 版本號已更新：$version');
-        }
-      });
-    });
-
-    // ✅ 監聽 BLE 數據流
-    ref.listen(bleDeviceDataStreamProvider, (previous, next) {
-      next.whenData((data) async {
-        debugPrint('📊 收到 BLE 數據：\n'
-            '電壓=${data.voltage}V,\n'
-            '溫度=${data.temperature}°C,\n'
-            '電流數=${data.currents.length},\n'
-            '電流=${data.currents},\n'
-            '時間=${data.timestamp},\n'
-            'RAW DATA=${data.rawData}\n');
-
-
-        // 獲取 repository
-        final repo = await ref.read(repoProvider.future);
-
-        // 轉換並儲存資料
-        if (data.timestamp != null &&
-            data.timestamp!.year == DateTime.now().year &&
-            data.currents.isNotEmpty) {
-          final sample = makeSampleFromBle(
-            deviceId: ref.read(targetDeviceNameProvider.notifier).state,
-            timestamp: data.timestamp!,
-            currents: data.currents,
-            voltage: data.voltage,
-            temperature: data.temperature,
-          );
-
-          debugPrint('sampleAA: $sample');
-
-          try {
-            await repo.addSample(sample);
-            debugPrint('✅ 資料已寫入：時間=${sample.ts}, 電流筆數=${sample.currents?.length}');
-          } catch (e) {
-            debugPrint('❌ 寫入失敗：$e');
-          }
-        }
-      });
-    });
 
     return Scaffold(
       appBar: AppBar(
@@ -200,8 +513,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                   }
                 },
                 itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'deviceConfig', child: Text('手動設定設備')),
-                  PopupMenuItem(value: 'fileExport', child: Text('檔案匯出')),
+                  PopupMenuItem(value: 'deviceConfig', child: Text('手動設定量測設備')),
+                  PopupMenuItem(value: 'fileExport', child: Text('量測資料匯出')),
                 ],
               ),
             ),
@@ -372,152 +685,5 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
         ],
       ),
     );
-  }
-
-  void _onNavTapped(int index) async {
-    setState(() => _navIndex = index);
-
-    switch (index) {
-      case 0: // 藍芽
-        _handleBleConnection();
-        break;
-
-      case 1: // QR Code 掃瞄
-        await _handleQrScan();
-        break;
-
-      case 2: // 平滑處理
-        _showSmoothingDialog();
-        break;
-
-      case 3: // 設定
-        _showSettingsDialog();
-        break;
-    }
-  }
-
-  void _handleBleConnection() async {
-    final bleService = ref.read(bleServiceProvider);
-    final isConnected = ref.read(bleConnectionStateProvider);
-
-    if (isConnected) {
-      // 停止前景服務
-      final success = await ForegroundBleService.stop();
-
-      if (success) {
-        ref.read(bleConnectionStateProvider.notifier).state = false;
-        _toast('已停止藍芽監聽');
-        debugPrint('已停止藍芽監聽');
-      } else {
-        _toast('停止服務失敗');
-      }
-
-      // 停止掃描
-      await bleService.stopScan();
-      ref.read(bleConnectionStateProvider.notifier).state = false;
-      _toast('已停止藍芽掃描');
-      debugPrint('已停止藍芽掃描');
-    } else {
-      // 先檢查 SharedPreferences 是否有儲存的設備名稱
-      final prefs = await SharedPreferences.getInstance();
-      String? deviceName = prefs.getString('device_name');
-
-      // 如果沒有儲存的設備名稱，則顯示對話框
-      if (deviceName == null || deviceName.isEmpty) {
-        deviceName = await _showDeviceNameDialog();
-        if (deviceName == null) return; // 使用者取消了對話框
-      }
-
-      // 啟動前景服務
-      final success = await ForegroundBleService.start(
-        targetDeviceName: deviceName,
-      );
-
-      if (success) {
-        ref.read(targetDeviceNameProvider.notifier).state = deviceName;
-        ref.read(bleConnectionStateProvider.notifier).state = true;
-        _toast('藍芽前景服務已啟動：$deviceName');
-        debugPrint('藍芽前景服務已啟動：$deviceName');
-
-        // 設定接收前景服務的數據
-        ForegroundBleService.receivePort((data) {
-          if (data is Map) {
-            if (data['type'] == 'data') {
-              debugPrint('前景服務數據: ${data['deviceName']}');
-            } else if (data['type'] == 'version') {
-              ref.read(targetDeviceVersionProvider.notifier).state = data['version'];
-            }
-          }
-        });
-      } else {
-        _toast('前景服務啟動失敗');
-      }
-
-      // 使用設備名稱開始掃描
-      ref.read(targetDeviceNameProvider.notifier).state = deviceName;
-      await bleService.startScan(targetName: deviceName.isEmpty ? null : deviceName);
-      ref.read(bleConnectionStateProvider.notifier).state = true;
-      _toast('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
-      debugPrint('開始藍芽掃描${deviceName.isEmpty ? '' : '：$deviceName'}');
-    }
-  }
-
-  Future<void> _saveDeviceName(String deviceName) async {
-    final prefs = await SharedPreferences.getInstance();
-        await prefs.setString('device_name', deviceName);
-  }
-
-  Future<String?> _showDeviceNameDialog() async {
-    final controller = TextEditingController(
-      text: ref.read(targetDeviceNameProvider.notifier).state,
-    );
-
-    return showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('藍芽裝置設定'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: '裝置名稱（必填）',
-            hintText: '例如：PSA00163',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (controller.text.isEmpty) {
-                _toast('請輸入產品名稱...');
-              } else {
-                _saveDeviceName(controller.text);
-                Navigator.pop(context, controller.text);
-              }
-            },
-            child: const Text('確定'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _toast(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        duration: const Duration(milliseconds: 800),
-      ),
-    );
-  }
-
-  @override
-  void dispose() {
-    // 停止 BLE 掃描
-    final bleService = ref.read(bleServiceProvider);
-    bleService.stopScan();
-    super.dispose();
   }
 }

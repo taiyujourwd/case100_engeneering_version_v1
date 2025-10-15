@@ -712,19 +712,11 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                         leftTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            reservedSize: 55,
+                            reservedSize: 15,
                             interval: safeLeftInterval,
                             getTitlesWidget: (v, _) {
-                              String text;
-                              if (v.abs() < 0.01 && v.abs() > 0) {
-                                text = v.toStringAsExponential(1);
-                              } else if (v.abs() < 1) {
-                                text = v.toStringAsFixed(2);
-                              } else if (v.abs() < 10) {
-                                text = v.toStringAsFixed(1);
-                              } else {
-                                text = v.toStringAsFixed(0);
-                              }
+                              // 全部顯示為整數
+                              final text = v.toStringAsFixed(0);
                               return Text(text, style: const TextStyle(fontSize: 9));
                             },
                           ),
@@ -746,13 +738,11 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
                               String text;
                               if (currentNanoAmperes.abs() < 0.01) {
-                                text = currentNanoAmperes.toStringAsExponential(2);
-                              } else if (currentNanoAmperes.abs() < 1) {
-                                text = currentNanoAmperes.toStringAsFixed(3);
-                              } else if (currentNanoAmperes.abs() < 10) {
-                                text = currentNanoAmperes.toStringAsFixed(2);
+                                // 接近 0 時顯示 0.00
+                                text = '0.00';
                               } else {
-                                text = currentNanoAmperes.toStringAsFixed(1);
+                                // 其他情況統一顯示兩位小數
+                                text = currentNanoAmperes.toStringAsFixed(2);
                               }
                               return Text(text, style: const TextStyle(fontSize: 8));
                             },
@@ -928,32 +918,32 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                     child: const Icon(Icons.refresh, size: 20),
                   ),
                 ),
-              Positioned(
-                left: 16,
-                top: 16,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withOpacity(0.6),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '${(windowMinutes * _zoomLevel).toStringAsFixed(0)} 分鐘 | ${todaySamples.length} 點',
-                        style: const TextStyle(color: Colors.white, fontSize: 12),
-                      ),
-                      if (_currentPlotDate != null)
-                        Text(
-                          '${_currentPlotDate!.year}/${_currentPlotDate!.month.toString().padLeft(2, '0')}/${_currentPlotDate!.day.toString().padLeft(2, '0')}',
-                          style: const TextStyle(color: Colors.white70, fontSize: 10),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
+              // Positioned(
+              //   left: 16,
+              //   top: 16,
+              //   child: Container(
+              //     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              //     decoration: BoxDecoration(
+              //       color: Colors.black.withOpacity(0.6),
+              //       borderRadius: BorderRadius.circular(12),
+              //     ),
+              //     child: Column(
+              //       crossAxisAlignment: CrossAxisAlignment.start,
+              //       mainAxisSize: MainAxisSize.min,
+              //       children: [
+              //         Text(
+              //           '${(windowMinutes * _zoomLevel).toStringAsFixed(0)} 分鐘 | ${todaySamples.length} 點',
+              //           style: const TextStyle(color: Colors.white, fontSize: 12),
+              //         ),
+              //         if (_currentPlotDate != null)
+              //           Text(
+              //             '${_currentPlotDate!.year}/${_currentPlotDate!.month.toString().padLeft(2, '0')}/${_currentPlotDate!.day.toString().padLeft(2, '0')}',
+              //             style: const TextStyle(color: Colors.white70, fontSize: 10),
+              //           ),
+              //       ],
+              //     ),
+              //   ),
+              // ),
               if (_tooltipText != null && _touchedX != null && _touchedY != null)
                 Positioned(
                   left: 16,

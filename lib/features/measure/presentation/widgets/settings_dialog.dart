@@ -1,15 +1,11 @@
-import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/current_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'glucose_dialog.dart';
-
-// ✅ 重要：確保這個 import 路徑正確
-// 請根據你的項目結構調整路徑
-// 例如：import '../providers/correction_params_provider.dart';
-// 或：import 'package:your_package/features/measure/presentation/providers/correction_params_provider.dart';
 import '../providers/correction_params_provider.dart';
+import '../../ble/ble_connection_mode.dart';
+import 'current_dialog.dart';
+import 'glucose_dialog.dart';
 
 class SettingResult {
   final int method; // 1 for BroadCast, 2 for Connection
@@ -41,7 +37,6 @@ Future<SettingResult?> showSettingsDialog(BuildContext context) async {
   return result; // null 表示 Exit
 }
 
-// ✅ 改為 ConsumerStatefulWidget
 class SettingsDialog extends ConsumerStatefulWidget {
   const SettingsDialog({super.key});
 
@@ -49,7 +44,6 @@ class SettingsDialog extends ConsumerStatefulWidget {
   ConsumerState<SettingsDialog> createState() => _SettingsDialogState();
 }
 
-// ✅ 改為 ConsumerState
 class _SettingsDialogState extends ConsumerState<SettingsDialog> {
   bool _isBroadcast = true; // true: BroadCast, false: Connection
   final TextEditingController _slopeController = TextEditingController();
@@ -84,9 +78,7 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
     final result = await showCurrentDialog(context);
 
     if (result != null) {
-      if (result != null) {
-        _toast('yMax=${result.yMax}、yMin=${result.yMin}');
-      }
+      _toast('yMax=${result.yMax}、yMin=${result.yMin}');
     }
   }
 
@@ -94,27 +86,34 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
     try {
       final prefs = await SharedPreferences.getInstance();
 
-      // ✅ 從 Provider 讀取當前值
-      // 注意：這裡假設 correctionParamsProvider 是 StateNotifierProvider
-      // 如果你的 provider 返回 AsyncValue，請查看下面的註釋
+      // ✅ 讀取連線模式（優先使用新的 ble_connection_mode）
+      int modeIndex = prefs.getInt('ble_connection_mode') ?? 0;
+
+      // 向下相容：如果沒有新的，嘗試讀取舊的
+      if (!prefs.containsKey('ble_connection_mode') &&
+          prefs.containsKey('connection_mode_broadcast')) {
+        final oldMode = prefs.getBool('connection_mode_broadcast') ?? true;
+        modeIndex = oldMode ? 0 : 1;
+      }
+
+      // ✅ 從 Provider 讀取 slope 和 intercept
       final params = ref.read(correctionParamsProvider);
 
       setState(() {
-        _isBroadcast = prefs.getBool('connection_mode_broadcast') ?? true;
-
-        // 使用 Provider 的值作為初始值
+        _isBroadcast = (modeIndex == 0); // 0=廣播, 1=連線
         _slopeController.text = params.slope.toStringAsFixed(1);
         _interceptController.text = params.intercept.toStringAsFixed(1);
       });
 
-      print('📋 Loaded settings - slope: ${params.slope}, intercept: ${params.intercept}');
+      debugPrint('📋 已載入設定 - 模式: ${_isBroadcast ? "廣播" : "連線"}, '
+          'slope: ${params.slope}, intercept: ${params.intercept}');
     } catch (e) {
-      print('❌ Error loading settings: $e');
+      debugPrint('❌ 載入設定錯誤: $e');
 
-      // 如果出錯，直接從 SharedPreferences 讀取
+      // 如果出錯，使用預設值
       final prefs = await SharedPreferences.getInstance();
       setState(() {
-        _isBroadcast = prefs.getBool('connection_mode_broadcast') ?? true;
+        _isBroadcast = true;
         _slopeController.text = prefs.getString('correction_slope') ?? '600.000';
         _interceptController.text = prefs.getString('correction_intercept') ?? '0.000';
       });
@@ -124,19 +123,26 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
   Future<void> _saveSettings() async {
     final prefs = await SharedPreferences.getInstance();
 
-    // 1. 保存連接模式
-    await prefs.setBool('connection_mode_broadcast', _isBroadcast);
+    // 1. ✅ 保存連線模式（同時保存新舊兩種格式以確保相容性）
+    final mode = _isBroadcast
+        ? BleConnectionMode.broadcast
+        : BleConnectionMode.connection;
+
+    await prefs.setInt('ble_connection_mode', mode.index); // 新格式：0或1
+    await prefs.setBool('connection_mode_broadcast', _isBroadcast); // 舊格式：true/false
+
+    debugPrint('✅ 已保存連線模式：${_isBroadcast ? "廣播" : "連線"} (index=${mode.index})');
 
     // 2. 解析 slope 和 intercept
     final slope = double.tryParse(_slopeController.text.trim());
     final intercept = double.tryParse(_interceptController.text.trim());
 
     if (slope != null && intercept != null) {
-      // 3. ✅ 關鍵：更新 Provider（這會立即通知所有監聽者）
+      // 3. ✅ 更新 Provider（這會立即通知所有監聽者，包括圖表）
       await ref.read(correctionParamsProvider.notifier)
           .updateParams(slope, intercept);
 
-      print('✅ Settings saved - slope: $slope, intercept: $intercept');
+      debugPrint('✅ 已保存校正參數 - slope: $slope, intercept: $intercept');
     } else {
       _toast('請輸入有效的數值');
     }
@@ -145,7 +151,7 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
   SettingResult _createSettingResult() {
     final method = _isBroadcast ? 1 : 2;
 
-    // 先以 double 解析，成功後再四捨五入為 int（維持你的型別介面）
+    // 先以 double 解析，成功後再四捨五入為 int
     int? toSafeInt(String s) {
       final d = double.tryParse(s.trim());
       return d != null ? d.round() : null;
@@ -197,7 +203,7 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
                   ),
                   const SizedBox(height: 16),
 
-                  // BroadCast / Connection Toggle
+                  // ✅ 連線模式切換（BroadCast / Connection）
                   Wrap(
                     spacing: 12,
                     runSpacing: 12,
@@ -236,8 +242,8 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
                         children: [
                           Expanded(
                             child: _buildActionButton(
-                                'Set Scale by 濃度',
-                                onPressed: _showGlucoseDialog
+                              'Set Scale by 濃度',
+                              onPressed: _showGlucoseDialog,
                             ),
                           ),
                         ],
@@ -247,8 +253,8 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
                         children: [
                           Expanded(
                             child: _buildActionButton(
-                                'Set Scale by 電流',
-                                onPressed: _showCurrentDialog
+                              'Set Scale by 電流',
+                              onPressed: _showCurrentDialog,
                             ),
                           ),
                         ],

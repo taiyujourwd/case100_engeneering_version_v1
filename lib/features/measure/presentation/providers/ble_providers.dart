@@ -21,15 +21,3 @@ final bleServiceProvider = Provider<BleService>((ref) {
 
 // BLE 連線狀態 Provider
 final bleConnectionStateProvider = StateProvider<bool>((ref) => false);
-
-// BLE 裝置數據流 Provider
-final bleDeviceDataStreamProvider = StreamProvider<BleDeviceData>((ref) {
-  final bleService = ref.watch(bleServiceProvider);
-  return bleService.deviceDataStream;
-});
-
-// 設備版本號串流
-final bleDeviceVersionStreamProvider = StreamProvider<String>((ref) {
-  final bleService = ref.watch(bleServiceProvider);
-  return bleService.deviceVersionStream;
-});

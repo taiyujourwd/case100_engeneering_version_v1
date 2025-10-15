@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/ble_device.dart';
+import 'ble_connection_mode.dart';
 
 /// -------- 時間位欄位規格 --------
 /// [31..26] 年(相對2000, 6b)  → 2000..2063
@@ -21,7 +22,36 @@ import '../models/ble_device.dart';
 enum EndianType { big, little }
 
 /// 根據實際韌體端序切換（先試 big，不對就換 little）
-const EndianType kTimeEndian = EndianType.big; // ← 若時間不對，改成 EndianType.little
+const EndianType kTimeEndian = EndianType.big;
+
+/// ✅ 硬體過濾（Hardware-offloaded filtering）：請填你的 Service UUID
+///    可填多個；越精準越省電、越不易被節流
+class _BleFilters {
+  static List<Uuid> kServiceFilter = <Uuid>[];     // ← 改成可變
+  static Uuid? kNotifyCharUuid;                    // ← 新增：通知用 Char UUID
+
+  static const _prefsServicesKey = 'ble_service_filters';
+  static const _prefsNotifyCharKey = 'ble_notify_char';
+
+  static Future<void> loadFromPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_prefsServicesKey) ?? const [];
+    kServiceFilter = list.map((s) => Uuid.parse(s)).toList();
+    final n = prefs.getString(_prefsNotifyCharKey);
+    kNotifyCharUuid = (n == null || n.isEmpty) ? null : Uuid.parse(n);
+    debugPrint('📥 已載入 Service filters=${kServiceFilter.length}, notify=$kNotifyCharUuid');
+  }
+
+  static Future<void> saveToPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+      _prefsServicesKey,
+      kServiceFilter.map((u) => u.toString()).toList(),
+    );
+    await prefs.setString(_prefsNotifyCharKey, kNotifyCharUuid?.toString() ?? '');
+    debugPrint('💾 已儲存 Service filters=${kServiceFilter.length}, notify=$kNotifyCharUuid');
+  }
+}
 
 /// 小工具：把 bytes 轉十六進位字串，便於 debug
 String _hex(List<int> bytes) =>
@@ -81,7 +111,6 @@ Uint8List encodeTimeBitfield4({
 }
 
 /// ---- decode：4 bytes (bit-field) → DateTime ----
-/// 依據端序把 4 bytes 解回 UTC 的 DateTime
 DateTime? decodeBitfieldTime4(
     List<int> bytes, {
       EndianType endian = kTimeEndian,
@@ -98,12 +127,12 @@ DateTime? decodeBitfieldTime4(
       ? ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
       : ((b3 << 24) | (b2 << 16) | (b1 << 8) | b0);
 
-  final yearOff = (v >> 26) & 0x3F; // 0..63
-  final month = (v >> 22) & 0x0F; // 1..12
-  final day = (v >> 17) & 0x1F; // 1..31
-  final hour = (v >> 12) & 0x1F; // 0..23
-  final minute = (v >> 6) & 0x3F; // 0..59
-  final second = v & 0x3F; // 0..59
+  final yearOff = (v >> 26) & 0x3F;
+  final month = (v >> 22) & 0x0F;
+  final day = (v >> 17) & 0x1F;
+  final hour = (v >> 12) & 0x1F;
+  final minute = (v >> 6) & 0x3F;
+  final second = v & 0x3F;
 
   final year = 2000 + yearOff;
   if (year < 2000 || year > 2063) return null;
@@ -117,7 +146,6 @@ DateTime? decodeBitfieldTime4(
 }
 
 /// 在 manufacturerData 中滑窗找出「看起來像 bit-field 時間」的 4 bytes
-/// 同時嘗試 Big / Little，回傳更接近 nowUtc 的那組
 ({int offset, EndianType endian, DateTime time})? guessBitfieldTime(
     List<int> data, {
       bool asUtc = true,
@@ -153,10 +181,16 @@ class BleService {
   StreamSubscription<DiscoveredDevice>? _scanSub;
   StreamSubscription<ConnectionStateUpdate>? _connSub;
 
+  // ✅ 連線模式相關
+  StreamSubscription<ConnectionStateUpdate>? _maintainConnection;
+  StreamSubscription<List<int>>? _notifySubscription;
+  String? _connectedDeviceId;
+  String? _connectedDeviceName;
+  BleConnectionMode _connectionMode = BleConnectionMode.broadcast;
+
   final _deviceDataController = StreamController<BleDeviceData>.broadcast();
   Stream<BleDeviceData> get deviceDataStream => _deviceDataController.stream;
 
-  // ✅ 版本號 StreamController
   final _deviceVersionController = StreamController<String>.broadcast();
   Stream<String> get deviceVersionStream => _deviceVersionController.stream;
 
@@ -165,13 +199,27 @@ class BleService {
   bool _gattBusy = false;
   bool _isScanning = false;
 
+  // ⏳ 掃描節流退避點（若系統回覆建議時間，會設定此值）
+  DateTime? _nextAllowedScanAt;
+
+  // ------- 連線模式控制 -------
+  void setConnectionMode(BleConnectionMode mode) {
+    _connectionMode = mode;
+    debugPrint('📡 連線模式已設定為：${mode == BleConnectionMode.broadcast ? "廣播" : "連線"}');
+  }
+
+  BleConnectionMode get connectionMode => _connectionMode;
+  String? get connectedDeviceId => _connectedDeviceId;
+  bool get isConnected => _connectedDeviceId != null;
+
   // ------- 權限 -------
   Future<bool> requestPermissions() async {
     if (Platform.isAndroid) {
       final statuses = await [
         Permission.bluetoothScan,
         Permission.bluetoothConnect,
-        Permission.location,
+        // Android 12+ 掃描不一定需要定位，但很多機型仍要求開定位服務（非權限）
+        Permission.location, // 你若完全不需要定位可移除，但請測機況
       ].request();
 
       if (statuses.values.any((s) => !s.isGranted)) {
@@ -179,7 +227,7 @@ class BleService {
         return false;
       }
 
-      // GPS 開啟（Android 某些機型掃描需要）
+      // 是否需要打開定位服務（很多機型掃描要開）
       try {
         final location = loc.Location();
         var perm = await location.hasPermission();
@@ -191,78 +239,138 @@ class BleService {
           serviceEnabled = await location.requestService();
         }
         if (!serviceEnabled) {
-          debugPrint('⚠️ GPS 未開啟');
-          return false;
+          debugPrint('⚠️ GPS 未開啟（部分機型會擋掃描）');
+          // 不直接 return false，讓你可觀察不同機型行為
         }
       } catch (e) {
         debugPrint('⚠️ GPS 檢查失敗：$e');
-        return false;
       }
     }
-    debugPrint('✅ 藍牙權限已授予');
+    debugPrint('✅ 藍牙權限已授予（或已檢查完）');
     return true;
   }
 
-  // ------- 掃描 -------
-  Future<void> startScan({String? targetName, String? targetId}) async {
+  // ------- 廣播模式：掃描（含硬體過濾＋節流退避）-------
+  Future<void> startScan({
+    String? targetName,
+    String? targetId,
+    bool skipPermissionCheck = false,
+    List<Uuid>? serviceUuids, // ← 可外部指定過濾
+  }) async {
     if (_isScanning) return;
 
-    // 假如上次沒收乾淨，這裡再保險一次
-    await _scanSub?.cancel();
-    _scanSub = null;
+    // 確保有載入過偏好
+    if (_BleFilters.kServiceFilter.isEmpty && _BleFilters.kNotifyCharUuid == null) {
+      try { await _BleFilters.loadFromPrefs(); } catch (_) {}
+    }
 
-    final ok = await requestPermissions();
-    if (!ok) {
-      debugPrint('❌ 無法啟動掃描：權限不足');
+    // 若系統曾回傳「建議重試時間」，在時間未到前不重新掃描
+    if (_nextAllowedScanAt != null && DateTime.now().isBefore(_nextAllowedScanAt!)) {
+      final wait = _nextAllowedScanAt!.difference(DateTime.now()).inSeconds;
+      debugPrint('⏳ 尚未到允許掃描時間（$wait s 後再試）');
       return;
     }
 
-    debugPrint('🔎 開始掃描裝置...');
+    await _scanSub?.cancel();
+    _scanSub = null;
+
+    if (!skipPermissionCheck) {
+      final ok = await requestPermissions();
+      if (!ok) {
+        debugPrint('❌ ble_service 無法啟動掃描：權限不足');
+        return;
+      }
+    }
+
+    // ✅ 使用硬體過濾（服務 UUID）
+    final filters = (serviceUuids != null && serviceUuids.isNotEmpty)
+        ? serviceUuids
+        : (_BleFilters.kServiceFilter.isNotEmpty
+        ? _BleFilters.kServiceFilter
+        : <Uuid>[]); // 第一次不知道就先空（之後會補上）
+
+    if (filters.isEmpty) {
+      debugPrint('⚠️ 未提供服務 UUID 過濾，將回退為「無硬體過濾」；背景時更易被節流');
+    }
+
+    debugPrint('🔎 開始掃描裝置（廣播模式），filters=${filters.map((e) => e.toString()).toList()}');
     _isScanning = true;
 
     _scanSub = _ble
-        .scanForDevices(withServices: [], scanMode: ScanMode.lowLatency)
+        .scanForDevices(
+      withServices: filters,               // ← 核心：硬體過濾
+      scanMode: ScanMode.lowLatency,
+      requireLocationServicesEnabled: false,      // 依需求；有的機型仍需開定位服務
+    )
         .listen((device) async {
-      // ✅ 先以 MAC/Id 過濾（最穩）
       if (targetId != null && targetId.isNotEmpty && device.id != targetId) {
         return;
       }
-      // ✅ 名稱只做寬鬆比對
       if (targetName != null && targetName.isNotEmpty) {
-        final n = device.name.toLowerCase();
+        final n = (device.name).toLowerCase();
         final q = targetName.toLowerCase();
         if (!(n.contains(q) || n.startsWith(q))) return;
       }
 
       debugPrint('📡 發現裝置：${device.name} (${device.id}) RSSI=${device.rssi}');
 
-      // 解析廣播（只用 bit-field）
       final parsed = _parseManufacturerData(device);
       if (parsed != null) _deviceDataController.add(parsed);
 
-      // 自動初始化：只做一次
       if (!_initializedDevices.contains(device.id)) {
         await _initializeDevice(device.id);
       }
-    }, onError: (e) async{
+    }, onError: (e) async {
       debugPrint('❌ 掃描錯誤：$e');
-      _isScanning = false;             // ✅ 確保旗標回復
+      _isScanning = false;
+
+      // ⏳ 解析「建議重試時間」，設定退避點
+      final dt = _parseSuggestedRetryTime(e.toString());
+      if (dt != null) {
+        _nextAllowedScanAt = dt;
+        final wait = dt.difference(DateTime.now());
+        debugPrint('🧯 Scan throttle，暫停至 $_nextAllowedScanAt（約 ${wait.inSeconds}s）');
+      } else {
+        _nextAllowedScanAt = DateTime.now().add(const Duration(minutes: 3));
+        debugPrint('🧯 Scan throttle（未提供時間），先退避 3 分鐘');
+      }
+
       await Future.delayed(const Duration(milliseconds: 500));
-      await restartScan();
-    }, onDone: () async{
+      await restartScan(
+        targetName: targetName,
+        targetId: targetId,
+        skipPermissionCheck: skipPermissionCheck,
+        serviceUuids: filters,
+      );
+    }, onDone: () async {
       debugPrint('ℹ️ 掃描串流已結束');
-      _isScanning = false;             // ✅ 確保旗標回復
+      _isScanning = false;
       await Future.delayed(const Duration(milliseconds: 500));
-      await restartScan();
+      await restartScan(
+        targetName: targetName,
+        targetId: targetId,
+        skipPermissionCheck: skipPermissionCheck,
+        serviceUuids: filters,
+      );
     });
   }
 
-  Future<void> restartScan({String? targetName}) async {
+  Future<void> restartScan({
+    String? targetName,
+    String? targetId,
+    bool skipPermissionCheck = false,
+    List<Uuid>? serviceUuids,
+  }) async {
     await _scanSub?.cancel();
     _scanSub = null;
     _isScanning = false;
     await Future.delayed(const Duration(milliseconds: 200));
-    await startScan(targetName: targetName);
+    await startScan(
+      targetName: targetName,
+      targetId: targetId,
+      skipPermissionCheck: skipPermissionCheck,
+      serviceUuids: serviceUuids,
+    );
   }
 
   Future<void> stopScan() async {
@@ -272,20 +380,225 @@ class BleService {
     debugPrint('⏹️ 已停止掃描');
   }
 
-  Future<void> _saveDeviceVersion(String deviceVersion) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('device_version', deviceVersion);
+  // ------- ✅ 連線模式：持續連線並訂閱 -------
+  Future<void> startConnectionMode({
+    required String deviceId,
+    String? deviceName,
+  }) async {
+    debugPrint('🔗 啟動連線模式：$deviceId');
 
-    // ✅ 發送版本號到 Stream
-    _deviceVersionController.add(deviceVersion);
+    _connectedDeviceName = deviceName;
+
+    await _maintainConnection?.cancel();
+    await _notifySubscription?.cancel();
+
+    _maintainConnection = _ble
+        .connectToDevice(
+      id: deviceId,
+      connectionTimeout: const Duration(seconds: 30),
+    )
+        .listen(
+          (update) async {
+        debugPrint('🔄 連線狀態：${update.connectionState}');
+
+        if (update.connectionState == DeviceConnectionState.connected) {
+          _connectedDeviceId = deviceId;
+
+          try {
+            await _withGattLock(() async {
+              try {
+                await _ble.requestConnectionPriority(
+                  deviceId: deviceId,
+                  priority: ConnectionPriority.highPerformance,
+                );
+                await Future.delayed(const Duration(milliseconds: 200));
+              } catch (e) {
+                debugPrint('⚠️ 升級連線優先權失敗：$e');
+              }
+
+              final chars = await _findCharacteristics(deviceId);
+              if (chars == null) {
+                debugPrint('❌ 找不到必要特徵');
+                return;
+              }
+
+              await Future.delayed(const Duration(milliseconds: 120));
+
+              final ok = await _writeDeviceTime(deviceId, chars.wr);
+              _timeWritten[deviceId] = ok;
+              debugPrint(ok ? '✅ 時間寫入成功' : '❌ 時間寫入失敗');
+
+              await Future.delayed(const Duration(milliseconds: 150));
+
+              try {
+                final fw = await _readFirmwareVersion(deviceId, chars.rdFw);
+                if (fw != null) {
+                  _saveDeviceVersion(fw);
+                  debugPrint('📦 韌體版本：$fw');
+                }
+              } catch (e) {
+                debugPrint('📦 讀取版本失敗：$e');
+              }
+
+              await Future.delayed(const Duration(milliseconds: 150));
+
+              await _subscribeToNotifications(deviceId);
+            });
+          } catch (e) {
+            debugPrint('❌ 連線模式初始化失敗：$e');
+          }
+        } else if (update.connectionState == DeviceConnectionState.disconnected) {
+          _connectedDeviceId = null;
+          debugPrint('🔌 設備已斷線');
+
+          await _notifySubscription?.cancel();
+          _notifySubscription = null;
+
+          if (_connectionMode == BleConnectionMode.connection) {
+            debugPrint('⏳ 3秒後嘗試重連...');
+            await Future.delayed(const Duration(seconds: 3));
+            await startConnectionMode(deviceId: deviceId, deviceName: deviceName);
+          }
+        }
+      },
+      onError: (e) {
+        debugPrint('❌ 連線錯誤：$e');
+      },
+    );
   }
 
-  // ------- 初始化：連線 → 寫時間 → 讀版本 -------
+  Future<void> _subscribeToNotifications(String deviceId) async {
+    try {
+      final services = await _ble.discoverServices(deviceId);
+      QualifiedCharacteristic? notifyCharQ;
+
+      // A) 若已知 Char UUID，直接定位
+      final preferredNotify = _BleFilters.kNotifyCharUuid; // ← 來自你前面存的
+      if (preferredNotify != null) {
+        for (final s in services) {
+          for (final c in s.characteristics) {
+            if (c.characteristicId == preferredNotify) {
+              notifyCharQ = QualifiedCharacteristic(
+                deviceId: deviceId,
+                serviceId: s.serviceId,
+                characteristicId: c.characteristicId,
+              );
+              break;
+            }
+          }
+          if (notifyCharQ != null) break;
+        }
+      }
+
+      // B) 若沒有存，或定位失敗 → 自動找第一個可通知的
+      if (notifyCharQ == null) {
+        for (final s in services) {
+          for (final c in s.characteristics) {
+            if (c.isNotifiable) {
+              notifyCharQ = QualifiedCharacteristic(
+                deviceId: deviceId,
+                serviceId: s.serviceId,
+                characteristicId: c.characteristicId,
+              );
+              // 同步補存（下次可直用）
+              _BleFilters.kNotifyCharUuid = c.characteristicId;
+              await _BleFilters.saveToPrefs();
+              break;
+            }
+          }
+          if (notifyCharQ != null) break;
+        }
+      }
+
+      if (notifyCharQ == null) {
+        debugPrint('⚠️ 找不到可用的通知特徵值');
+        return;
+      }
+
+      _notifySubscription = _ble.subscribeToCharacteristic(notifyCharQ).listen(
+            (data) {
+          debugPrint('📨 收到連線模式數據：${data.length} bytes');
+          _parseConnectionModeData(deviceId, data);
+        },
+        onError: (e) {
+          debugPrint('❌ 訂閱通知失敗：$e');
+        },
+      );
+
+      debugPrint('✅ 已訂閱通知特徵值：${notifyCharQ.characteristicId}');
+    } catch (e) {
+      debugPrint('❌ 訂閱通知過程失敗：$e');
+    }
+  }
+
+  void _parseConnectionModeData(String deviceId, List<int> data) {
+    if (data.isEmpty) return;
+
+    debugPrint('🔍 解析連線數據：${_hex(data)}');
+
+    DateTime? timestamp;
+    double? voltage;
+    double? temperature;
+    final rawCurrents = <double>[];
+
+    if (data.length >= 4) {
+      final guess = guessBitfieldTime(data, asUtc: false);
+      if (guess != null) {
+        timestamp = guess.time;
+        debugPrint('⏱️ 連線模式時間：$timestamp');
+      }
+    }
+
+    if (data.length >= 6) {
+      final rawCurrent = (data[4] << 8) | data[5];
+      final current_mA = rawCurrent / 10.0;
+      rawCurrents.add(current_mA);
+      debugPrint('⚡ 電流：${current_mA} mA');
+    }
+
+    if (data.length >= 8) {
+      final rawTemp = (data[6] << 8) | data[7];
+      temperature = rawTemp / 100.0;
+      debugPrint('🌡️ 溫度：${temperature} °C');
+    }
+
+    if (data.length >= 10) {
+      final rawVolt = (data[8] << 8) | data[9];
+      voltage = rawVolt / 1000.0;
+      debugPrint('🔋 電壓：${voltage} V');
+    }
+
+    final current = calculateCurrent(rawCurrents);
+    final currents = [current];
+
+    final bleData = BleDeviceData(
+      id: deviceId,
+      name: _connectedDeviceName ?? deviceId.substring(0, 8),
+      rssi: 0,
+      timestamp: timestamp ?? DateTime.now(),
+      voltage: voltage,
+      temperature: temperature,
+      currents: currents,
+      rawData: data,
+    );
+
+    _deviceDataController.add(bleData);
+  }
+
+  Future<void> stopConnectionMode() async {
+    await _notifySubscription?.cancel();
+    _notifySubscription = null;
+    await _maintainConnection?.cancel();
+    _maintainConnection = null;
+    _connectedDeviceId = null;
+    _connectedDeviceName = null;
+    debugPrint('🔌 連線模式已停止');
+  }
+
+  // ------- 初始化設備（廣播模式用）-------
   Future<void> _initializeDevice(String deviceId) async {
     debugPrint('🔗 初始化裝置：$deviceId');
     _initializedDevices.add(deviceId);
-
-    // await stopScan(); // 先停掃，提高連線穩定度
 
     final completer = Completer<void>();
 
@@ -300,7 +613,6 @@ class BleService {
       if (update.connectionState == DeviceConnectionState.connected) {
         try {
           await _withGattLock(() async {
-            // 提升連線優先權（可忽略錯誤）
             try {
               await _ble.requestConnectionPriority(
                 deviceId: deviceId,
@@ -335,6 +647,10 @@ class BleService {
               debugPrint('📦 讀取版本失敗：$e');
             }
           });
+
+          // 在 connected 後、_withGattLock 裡面寫時間/讀版本之後，加：
+          await _captureAndStoreGattProfile(deviceId);
+
         } catch (e) {
           debugPrint('❌ 初始化失敗：$e');
         } finally {
@@ -343,10 +659,14 @@ class BleService {
           debugPrint('🔌 已斷線');
           if (!completer.isCompleted) completer.complete();
 
-          // 重新掃描
+          // 回到廣播模式持續掃描（若仍在 broadcast 模式）
           await Future.delayed(const Duration(seconds: 3));
-          if (!_isScanning) await restartScan();
-          if (!_isScanning) await startScan();
+          if (!_isScanning && _connectionMode == BleConnectionMode.broadcast) {
+            await restartScan(skipPermissionCheck: true, serviceUuids: _BleFilters.kServiceFilter);
+            if (!_isScanning) {
+              await startScan(skipPermissionCheck: true, serviceUuids: _BleFilters.kServiceFilter);
+            }
+          }
         }
       } else if (update.connectionState == DeviceConnectionState.disconnected) {
         if (!completer.isCompleted) completer.complete();
@@ -359,7 +679,59 @@ class BleService {
     await completer.future;
   }
 
-  // ------- 簡單 GATT 互斥鎖 -------
+  /// 連線後抓取 Service/Characteristic，更新硬體過濾與通知 Char，並存到偏好
+  Future<void> _captureAndStoreGattProfile(String deviceId) async {
+    try {
+      final services = await _ble.discoverServices(deviceId);
+
+      // 1) 收集所有 Service UUID（去重）
+      final serviceIds = <Uuid>{};
+      for (final s in services) {
+        serviceIds.add(s.serviceId);
+      }
+      if (serviceIds.isNotEmpty) {
+        _BleFilters.kServiceFilter = serviceIds.toList();
+        debugPrint('🧱 探得 ${_BleFilters.kServiceFilter.length} 個 Service：${_BleFilters.kServiceFilter}');
+      } else {
+        debugPrint('⚠️ discoverServices 沒拿到任何 Service');
+      }
+
+      // 2) 尋找一個「可通知」的 Characteristic（若你已知哪個服務更準，可再加條件）
+      Uuid? notifyChar;
+      for (final s in services) {
+        for (final c in s.characteristics) {
+          // 優先挑「可通知」的
+          final notifiable = c.isNotifiable;
+          // 若你的韌體有特定 UUID 模式，可在這裡加白名單/關鍵字篩選
+          if (notifiable) {
+            notifyChar = c.characteristicId;
+            debugPrint('🔔 偵測到可通知 Char: $notifyChar （Service: ${s.serviceId}）');
+            break;
+          }
+        }
+        if (notifyChar != null) break;
+      }
+
+      if (notifyChar != null) {
+        // 存起來供後續連線模式直接使用
+        _BleFilters.kNotifyCharUuid = notifyChar;
+      } else {
+        debugPrint('⚠️ 沒找到可通知的 Char（之後會回退為自動搜尋方式）');
+      }
+
+      // 3) 寫入偏好（下次掃描先用硬體過濾）
+      await _BleFilters.saveToPrefs();
+    } catch (e) {
+      debugPrint('❌ _captureAndStoreGattProfile 失敗：$e');
+    }
+  }
+
+  Future<void> _saveDeviceVersion(String deviceVersion) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('device_version', deviceVersion);
+    _deviceVersionController.add(deviceVersion);
+  }
+
   Future<T> _withGattLock<T>(Future<T> Function() body) async {
     while (_gattBusy) {
       await Future.delayed(const Duration(milliseconds: 10));
@@ -372,14 +744,10 @@ class BleService {
     }
   }
 
-  // ------- 尋找特徵 -------
   Future<({QualifiedCharacteristic wr, QualifiedCharacteristic rdFw})?>
   _findCharacteristics(String deviceId) async {
-    debugPrint('deviceId: $deviceId');
     final services = await _ble.discoverServices(deviceId);
     QualifiedCharacteristic? wr, rdFw;
-
-    debugPrint('servicesAAA: $services');
 
     for (final s in services) {
       for (final c in s.characteristics) {
@@ -403,9 +771,10 @@ class BleService {
     return (wr: wr, rdFw: rdFw);
   }
 
-  // ------- 寫入時間（bit-field + UTC） -------
   Future<bool> _writeDeviceTime(
-      String deviceId, QualifiedCharacteristic wr) async {
+      String deviceId,
+      QualifiedCharacteristic wr,
+      ) async {
     final nowUtc = DateTime.now();
     final t4 = encodeTimeBitfield4(
       t: Time(
@@ -423,12 +792,12 @@ class BleService {
     debugPrint('>> t4 (hex): ${_hex(t4)}  (endian=$kTimeEndian)');
 
     final payload = Uint8List.fromList(<int>[
-      0x01,             // Method = IT (依你協定)
-      0x03, 0xE8,       // Quiet ms = 1000 (16-bit big, 0x03E8)
-      0x00, 0x64,       // Sample ms = 100 (16-bit big, 0x0064)
-      0x00, 0x01,       // Run count = 1 (16-bit big)
-      0x03, 0x84,       // Init E (mV) = 900 (16-bit big)
-      ...t4,            // Time (4B, bit-field with kTimeEndian)
+      0x01,
+      0x03, 0xE8,
+      0x00, 0x64,
+      0x00, 0x01,
+      0x03, 0x84,
+      ...t4,
     ]);
 
     debugPrint('>> payload (hex): ${_hex(payload)}');
@@ -452,68 +821,64 @@ class BleService {
     return false;
   }
 
-  // ------- 讀取韌體版本 -------
   Future<String?> _readFirmwareVersion(
       String deviceId, QualifiedCharacteristic rd) async {
     try {
+      debugPrint('📖 開始讀取韌體版本...');
+
       final data = await _ble.readCharacteristic(rd);
-      if (data.isEmpty) return null;
-      return String.fromCharCodes(data);
+
+      debugPrint('📖 讀取到原始數據: $data');
+
+      if (data.isEmpty) {
+        debugPrint('⚠️ 版本號數據為空');
+        return null;
+      }
+
+      final version = String.fromCharCodes(data);
+      debugPrint('✅ 解析版本號: $version');
+
+      return version;
     } catch (e) {
       debugPrint('❌ 讀版本失敗：$e');
       return null;
     }
   }
 
-  // ------- 解析廣播：只用 bit-field -------
   BleDeviceData? _parseManufacturerData(DiscoveredDevice device) {
     final mfr = device.manufacturerData;
     if (mfr.isEmpty) return null;
 
-    // 找看起來像 bit-field 時間的切片（同時嘗試 big/little）
     DateTime? timestamp;
     final guess = guessBitfieldTime(mfr);
     if (guess != null) {
       timestamp = guess.time;
-      debugPrint(
-          '⏱️ bit-field 時間 @off=${guess.offset}, endian=${guess.endian}, value=$timestamp, bytes(hex)=${_hex(mfr.sublist(guess.offset, guess.offset + 4))}');
-    } else {
-      debugPrint('⏱️ 廣播未找到可解的 bit-field 時間');
+      debugPrint('⏱️ bit-field 時間 @off=${guess.offset}, endian=${guess.endian}, value=$timestamp');
     }
 
-    // 其他欄位（固定位置解析）
     double? voltage;
     double? temperature;
-
-    // 電流維持List回傳（若想只回傳單點，可改成單值）
     final rawCurrents = <double>[];
 
-    // 假設已有 _safeU16 為 big-endian： (hi<<8)|lo
     int _safeU16(List<int> m, int hiIndex) {
       if (hiIndex < 0 || hiIndex + 1 >= m.length) return -1;
       return (m[hiIndex] << 8) | m[hiIndex + 1];
     }
 
-    // 取電流 [4..5] → mA = raw / 10.0
     final rawCurrent = _safeU16(mfr, 4);
     if (rawCurrent >= 0) {
       final current_mA = rawCurrent / 10.0;
       rawCurrents.add(current_mA);
-      debugPrint('⚡ current raw=0x${rawCurrent.toRadixString(16)} -> ${current_mA.toStringAsFixed(1)} mA');
     }
 
-    // 取溫度 [6..7] → °C = raw / 100.0
     final rawTemp = _safeU16(mfr, 6);
     if (rawTemp >= 0) {
       temperature = rawTemp / 100.0;
-      debugPrint('🌡️ temp raw=0x${rawTemp.toRadixString(16)} -> ${temperature.toStringAsFixed(2)} °C');
     }
 
-    // 取電壓 [8..9] → V = raw / 1000.0
     final rawVolt = _safeU16(mfr, 8);
     if (rawVolt >= 0) {
       voltage = rawVolt / 1000.0;
-      debugPrint('🔋 volt raw=0x${rawVolt.toRadixString(16)} -> ${voltage.toStringAsFixed(3)} V');
     }
 
     final current = calculateCurrent(rawCurrents);
@@ -531,46 +896,40 @@ class BleService {
     );
   }
 
-  //轉換電流值
   double calculateCurrent(List<double> currents) {
-    String functionName = "calculateCurrent()";
     try {
-      // 電路參數
       double R1 = 2.00E6;
       double R2 = 88.7E3;
       double R3 = 100.00E3;
       double R4 = 2.00E6;
-      double V_09 = 0.9000;  // V_0.9
-      double TIR_Inp = V_09; // TIR_In+
+      double V_09 = 0.9000;
+      double TIR_Inp = V_09;
 
       if (currents.isEmpty) {
         throw Exception("currents 陣列為空");
       }
 
-      // 取第一個值 (假設單位是 mV，要轉 V)
-      double V_out = currents.first / 1000.0; // 2356.2 mV → 2.3562 V
-
-      // 計算公式
+      double V_out = currents.first / 1000.0;
       double V_In_N = (V_out - V_09) / (R3 + R4) * R3 + V_09;
-      double V_TIR  = V_In_N + (V_In_N / R1) * R2;
-      double result = (V_TIR - TIR_Inp) / 20E6; // 電流 (A)
+      double V_TIR = V_In_N + (V_In_N / R1) * R2;
+      double result = (V_TIR - TIR_Inp) / 20E6;
 
       return result;
     } catch (error) {
-      debugPrint(">> log : [catch] - $functionName, $error");
+      debugPrint(">> calculateCurrent() error: $error");
       return -1;
     }
   }
 
-  // ------- 資源釋放 -------
   void dispose() {
     _scanSub?.cancel();
     _connSub?.cancel();
+    _maintainConnection?.cancel();
+    _notifySubscription?.cancel();
     _deviceDataController.close();
     _deviceVersionController.close();
   }
 
-  /// 將 List<int>/Uint8List 轉成十六進位清單樣式：[C0, AD, 00, 5A, ...]
   String toHexList(Iterable<int> bytes, {bool withBrackets = true}) {
     final hex = bytes
         .map((b) => b.toRadixString(16).padLeft(2, '0').toUpperCase())
@@ -578,7 +937,6 @@ class BleService {
     return withBrackets ? '[$hex]' : hex;
   }
 
-  /// 十六進位轉回位元組（支援 "C0 AD 00", "C0,AD,00", "0xC0 0xAD" 等）
   List<int> parseHexList(String s) {
     final cleaned = s
         .replaceAll('[', '')
@@ -594,7 +952,6 @@ class BleService {
         .toList(growable: false);
   }
 
-  /// 進階：hexdump（每行 16 bytes，帶位移）
   String hexDump(Iterable<int> bytes, {int width = 16}) {
     final b = bytes.toList();
     final buf = StringBuffer();
@@ -606,5 +963,50 @@ class BleService {
       buf.writeln(off.toRadixString(16).padLeft(4, '0').toUpperCase() + ': ' + hex);
     }
     return buf.toString();
+  }
+
+  /// 解析「Undocumented scan throttle ... suggested retry date is ...」的時間
+  /// 不同機型格式會不同，這裡做寬鬆處理；若解析失敗回 null
+  DateTime? _parseSuggestedRetryTime(String message) {
+    try {
+      // 盡量抓最後的日期字串
+      final re = RegExp(r'suggested retry date is (.+)$');
+      final m = re.firstMatch(message);
+      if (m == null) return null;
+      var s = m.group(1)!.trim();
+
+      // 常見格式會含 GMT+08:00 等，先做些替換讓 DateTime.parse 比較好吃
+      s = s.replaceAll('GMT', '').replaceAll('  ', ' ').trim();
+
+      // 嘗試直接 parse（大多數失敗，保留保險）
+      DateTime? dt;
+      try {
+        dt = DateTime.parse(s);
+      } catch (_) {
+        // 粗略 fallback：抓到「HH:mm:ss +08:00 yyyy」的 +08:00 與 yyyy 來組合
+        final tz = RegExp(r'([+-]\d{2}:\d{2})').firstMatch(s)?.group(1);
+        final year = RegExp(r'\b(20\d{2})\b').firstMatch(s)?.group(1);
+        final time = RegExp(r'\b\d{2}:\d{2}:\d{2}\b').firstMatch(s)?.group(0);
+        final monthStr = RegExp(r'\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b')
+            .firstMatch(s)
+            ?.group(0);
+        final day = RegExp(r'\b\d{1,2}\b').firstMatch(s)?.group(0);
+
+        if (tz != null && year != null && time != null && monthStr != null && day != null) {
+          final monthMap = {
+            'Jan': '01','Feb': '02','Mar': '03','Apr': '04','May': '05','Jun': '06',
+            'Jul': '07','Aug': '08','Sep': '09','Oct': '10','Nov': '11','Dec': '12'
+          };
+          final month = monthMap[monthStr]!;
+          final day2 = day.padLeft(2, '0');
+          final iso = '$year-$month-${day2}T$time$tz';
+          dt = DateTime.tryParse(iso);
+        }
+      }
+      // 如果還是失敗，就回 null
+      return dt;
+    } catch (_) {
+      return null;
+    }
   }
 }
