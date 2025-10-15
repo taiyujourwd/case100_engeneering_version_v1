@@ -48,13 +48,17 @@
 
 	<key>NSBluetoothAlwaysUsageDescription</key>
     <string>需要藍牙權限以連接血糖測量裝置</string>
-
     <key>NSBluetoothPeripheralUsageDescription</key>
     <string>需要藍牙權限以連接血糖測量裝置</string>
-
     <key>NSLocationWhenInUseUsageDescription</key>
     <string>需要位置權限以掃描藍牙裝置</string>
-
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>藍牙掃描需要位置權限</string>
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>bluetooth-central</string>
+        <string>processing</string>
+    </array>
     <key>NSCameraUsageDescription</key>
     <string>需要相機權限以掃描 QR Code</string>
 </dict>

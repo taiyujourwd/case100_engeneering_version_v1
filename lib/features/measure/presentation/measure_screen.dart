@@ -3,12 +3,14 @@ import 'package:case100_engeneering_version_v1/features/measure/presentation/pro
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/settings_dialog.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/smoothing_settings_dialog.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/models/service_request_result.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../common/utils/date_key.dart';
 import '../data/isar_schemas.dart';
 import '../data/measure_repository.dart';
+import '../foreground/foreground_ble_service.dart';
 import '../screens/qu_scan_screen.dart';
 import 'measure_detail_screen.dart';
 import 'providers/ble_providers.dart';
@@ -33,6 +35,21 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     _dayKey = dayKeyOf(DateTime.now());
     _loadScannedDevice(); // 載入已掃描的設備
     _loadDeviceInfo();
+    _checkForegroundServiceStatus(); // 檢查前景服務狀態
+  }
+
+  // 檢查前景服務狀態
+  Future<void> _checkForegroundServiceStatus() async {
+    final isRunning = await ForegroundBleService.isRunning();
+    if (isRunning) {
+      ref.read(bleConnectionStateProvider.notifier).state = true;
+      _toast('前景服務運行中');
+
+      // 重新設定接收端口
+      ForegroundBleService.receivePort((data) {
+        // 處理數據
+      });
+    }
   }
 
   // 載入已掃描的設備名稱
@@ -384,6 +401,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     final isConnected = ref.read(bleConnectionStateProvider);
 
     if (isConnected) {
+      // 停止前景服務
+      final success = await ForegroundBleService.stop();
+
+      if (success) {
+        ref.read(bleConnectionStateProvider.notifier).state = false;
+        _toast('已停止藍芽監聽');
+        debugPrint('已停止藍芽監聽');
+      } else {
+        _toast('停止服務失敗');
+      }
+
       // 停止掃描
       await bleService.stopScan();
       ref.read(bleConnectionStateProvider.notifier).state = false;
@@ -398,6 +426,31 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
       if (deviceName == null || deviceName.isEmpty) {
         deviceName = await _showDeviceNameDialog();
         if (deviceName == null) return; // 使用者取消了對話框
+      }
+
+      // 啟動前景服務
+      final success = await ForegroundBleService.start(
+        targetDeviceName: deviceName,
+      );
+
+      if (success) {
+        ref.read(targetDeviceNameProvider.notifier).state = deviceName;
+        ref.read(bleConnectionStateProvider.notifier).state = true;
+        _toast('藍芽前景服務已啟動：$deviceName');
+        debugPrint('藍芽前景服務已啟動：$deviceName');
+
+        // 設定接收前景服務的數據
+        ForegroundBleService.receivePort((data) {
+          if (data is Map) {
+            if (data['type'] == 'data') {
+              debugPrint('前景服務數據: ${data['deviceName']}');
+            } else if (data['type'] == 'version') {
+              ref.read(targetDeviceVersionProvider.notifier).state = data['version'];
+            }
+          }
+        });
+      } else {
+        _toast('前景服務啟動失敗');
       }
 
       // 使用設備名稱開始掃描
