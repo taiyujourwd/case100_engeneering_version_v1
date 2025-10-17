@@ -47,10 +47,13 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
   void initState() {
     super.initState();
     _dayKey = dayKeyOf(DateTime.now());
+
+    _initForegroundService();
+
     _loadScannedDevice();
     _loadDeviceInfo();
-    _setupDataCallback();
-    _initForegroundService();
+    // _setupDataCallback();
+
     _checkForegroundServiceStatus();
 
     // ✅ 監聽 App 生命週期
@@ -79,20 +82,23 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     }
   }
 
-  void _setupDataCallback() {
-    debugPrint('🔧 [UI] 設置 data callback...');
-
-    // ✅ 只在 Android 上設置 Foreground Task callback
-    if (Platform.isAndroid) {
-      FlutterForegroundTask.removeTaskDataCallback(_handleForegroundData);
-      FlutterForegroundTask.addTaskDataCallback(_handleForegroundData);
-      debugPrint('✅ [Android] data callback 設置完成');
-    } else {
-      debugPrint('ℹ️ [iOS] 跳過 foreground task callback');
-    }
-  }
+  // void _setupDataCallback() {
+  //   debugPrint('🔧 [UI] 設置 data callback...');
+  //   print('test123 _setupDataCallback');
+  //
+  //   // ✅ 只在 Android 上設置 Foreground Task callback
+  //   if (Platform.isAndroid) {
+  //     print('test123 _setupDataCallback2');
+  //     FlutterForegroundTask.removeTaskDataCallback(_handleForegroundData);
+  //     FlutterForegroundTask.addTaskDataCallback(_handleForegroundData);
+  //     debugPrint('✅ [Android] data callback 設置完成');
+  //   } else {
+  //     debugPrint('ℹ️ [iOS] 跳過 foreground task callback');
+  //   }
+  // }
 
   void _handleForegroundData(dynamic data) {
+    print('test123 versionUpdate');
     debugPrint('📬 [UI] 收到原始訊息: $data');
 
     if (!mounted) {
@@ -104,12 +110,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
       final type = data['type'];
       debugPrint('📦 [UI] 訊息類型: $type');
 
+      print('test123 version 1');
+
       switch (type) {
         case 'version':
+          print('test123 version 2');
           final version = data['version'] as String?;
           if (version != null && version.isNotEmpty) {
+            print('test123 version 3');
             debugPrint('✅ [UI] 收到版本號: $version');
             if (mounted) {
+              print('test123 version 4');
               ref.read(targetDeviceVersionProvider.notifier).state = version;
               debugPrint('✅ [UI] 版本號已更新到 provider');
             }
@@ -183,6 +194,16 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
 
   Future<void> _initForegroundService() async {
     await ForegroundBleService.init();
+
+    // ✅ 只在 Android 上設置 Foreground Task callback
+    if (Platform.isAndroid) {
+      print('test123 _setupDataCallback2');
+      FlutterForegroundTask.removeTaskDataCallback(_handleForegroundData);
+      FlutterForegroundTask.addTaskDataCallback(_handleForegroundData);
+      debugPrint('✅ [Android] data callback 設置完成');
+    } else {
+      debugPrint('ℹ️ [iOS] 跳過 foreground task callback');
+    }
 
     final isRunning = await ForegroundBleService.isRunning();
     if (isRunning) {
