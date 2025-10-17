@@ -48,6 +48,7 @@
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
             android:permission="android.permission.FOREGROUND_SERVICE"
+            android:stopWithTask="false"
             android:exported="false"
             android:foregroundServiceType="connectedDevice|dataSync" />
 
@@ -58,11 +59,13 @@
 
         <!-- 這個是 flutter_foreground_task 需要的 BootReceiver（讓開機自啟動） -->
         <receiver
-            android:name="com.pravera.flutter_foreground_task.receiver.BootReceiver"
-            android:enabled="false"
+            android:name="com.pravera.flutter_foreground_task.service.RestartReceiver"
+            android:enabled="true"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
         <activity
