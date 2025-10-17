@@ -274,31 +274,31 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
   List<LineChartBarData> _buildContinuousSegments(List<FlSpot> spots) {
     if (spots.length < 2) return [];
-    const gapThresholdMs = 90 * 1000.0;
 
+    const gapThresholdMs = 90 * 1000.0; // 90秒
     final List<LineChartBarData> segments = [];
-    List<FlSpot> currentSegment = [spots[0]];
+    List<FlSpot> currentSegment = [];
 
-    for (int i = 1; i < spots.length; i++) {
-      final prev = spots[i - 1];
-      final curr = spots[i];
-      final timeDiff = curr.x - prev.x;
+    for (int i = 0; i < spots.length; i++) {
+      final spot = spots[i];
 
-      // 先檢查是否需要斷段
-      final shouldBreak = timeDiff > gapThresholdMs;
+      // ✅ 檢查是否在視窗範圍內
+      if (spot.x >= _tStartMs && spot.x <= _tEndMs) {
+        currentSegment.add(spot);
+      }
 
-      // 對 (prev -> curr) 做視窗截斷
-      final clamped = _clampSegmentToWindow(prev, curr, _tStartMs, _tEndMs);
+      // ✅ 檢查是否需要斷開（下一個點時間間隔太大）
+      bool shouldBreak = false;
+      if (i < spots.length - 1) {
+        final nextSpot = spots[i + 1];
+        final timeDiff = nextSpot.x - spot.x;
+        shouldBreak = timeDiff > gapThresholdMs;
+      }
 
-      if (!shouldBreak) {
-        // 連續段：有有效截斷才加進當前段
-        if (clamped.length == 2) {
-          if (currentSegment.isEmpty) currentSegment.add(clamped.first);
-          currentSegment.add(clamped.last);
-        }
-      } else {
-        // 先收掉目前連續段
+      // ✅ 如果需要斷開，或已經是最後一個點，結束當前段
+      if (shouldBreak || i == spots.length - 1) {
         if (currentSegment.length >= 2) {
+          // ✅ 繪製這一段
           segments.add(LineChartBarData(
             spots: List.from(currentSegment),
             isCurved: false,
@@ -309,32 +309,9 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
             belowBarData: BarAreaData(show: false),
           ));
         }
+        // 清空當前段，準備下一段
         currentSegment = [];
-
-        // 斷段之間的「橋接線」：也用截斷結果畫（可選）
-        if (clamped.length == 2) {
-          segments.add(LineChartBarData(
-            spots: clamped,
-            isCurved: false,
-            barWidth: 2,
-            color: Colors.blue,
-            dotData: const FlDotData(show: false),
-            belowBarData: BarAreaData(show: false),
-          ));
-        }
       }
-    }
-
-    if (currentSegment.length >= 2) {
-      segments.add(LineChartBarData(
-        spots: List.from(currentSegment),
-        isCurved: false,
-        isStrokeCapRound: true,
-        barWidth: 2,
-        color: Colors.blue,
-        dotData: const FlDotData(show: false),
-        belowBarData: BarAreaData(show: false),
-      ));
     }
 
     return segments;
@@ -347,29 +324,32 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     final List<LineChartBarData> gapSegments = [];
 
     for (int i = 1; i < spots.length; i++) {
-      final timeDiff = spots[i].x - spots[i - 1].x;
+      final prev = spots[i - 1];
+      final curr = spots[i];
+      final timeDiff = curr.x - prev.x;
 
-      if (timeDiff >= gapThresholdMs) { // 注意：已改成 >=
-        final seg = _clampSegmentToWindow(
-          spots[i - 1],
-          spots[i],
-          _tStartMs,
-          _tEndMs,
-        );
-        if (seg.length == 2) {
+      // ✅ 只在時間間隔大於閾值時繪製橋接線
+      if (timeDiff >= gapThresholdMs) {
+        // ✅ 檢查至少有一個點在視窗內
+        final prevInWindow = prev.x >= _tStartMs && prev.x <= _tEndMs;
+        final currInWindow = curr.x >= _tStartMs && curr.x <= _tEndMs;
+
+        if (prevInWindow || currInWindow) {
           gapSegments.add(
             LineChartBarData(
-              spots: seg,
+              spots: [prev, curr],
               isCurved: false,
-              barWidth: 2,
-              color: Colors.blue, // 或保留淡色/虛線
+              barWidth: 1.5,  // ✅ 稍微細一點，區分橋接線
+              color: Colors.blue.withOpacity(0.5),  // ✅ 半透明，區分橋接線
               dotData: const FlDotData(show: false),
               belowBarData: BarAreaData(show: false),
+              dashArray: [5, 5],  // ✅ 虛線，區分橋接線
             ),
           );
         }
       }
     }
+
     return gapSegments;
   }
 
@@ -662,8 +642,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
                         // 1) 連續段：仍然可保留合理性判斷（避免超平直假數據畫主線）
                         if (hasDataInWindow &&
-                            glucoseFromCurrentWin.length >= 2 &&
-                            _hasReasonableYRange(glucoseFromCurrentWin)) ...[
+                            glucoseFromCurrentWin.length >= 2) ...[
                           ..._buildContinuousSegments(glucoseFromCurrentWin),
                         ],
 
@@ -712,7 +691,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                         leftTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            reservedSize: 15,
+                            reservedSize: 20,
                             interval: safeLeftInterval,
                             getTitlesWidget: (v, _) {
                               // 全部顯示為整數
@@ -729,7 +708,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                         rightTitles: AxisTitles(
                           sideTitles: SideTitles(
                             showTitles: true,
-                            reservedSize: 55,
+                            reservedSize: 20,
                             interval: safeRightInterval,
                             getTitlesWidget: (glucoseValue, _) {
                               final currentTimesE8 = _glucoseToCurrent(glucoseValue);
@@ -1071,25 +1050,6 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     }
 
     return _Range(minV, maxV);
-  }
-
-  bool _hasReasonableYRange(List<FlSpot> spots) {
-    if (spots.length < 2) return false;
-
-    final yValues = spots.map((e) => e.y).toList();
-    final minY = yValues.reduce(math.min);
-    final maxY = yValues.reduce(math.max);
-    final yRange = (maxY - minY).abs();
-
-    if (yRange < 0.01) {
-      return false;
-    }
-
-    if (minY.abs() < 0.001 && maxY.abs() < 0.001) {
-      return false;
-    }
-
-    return true;
   }
 
   double _niceInterval(double min, double max, int targetTicks) {

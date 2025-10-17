@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/correction_params_provider.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/device_info_providers.dart';
@@ -58,7 +59,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     debugPrint('✅ [UI] data callback 設置完成');
   }
 
-  // ✅ 處理來自 foreground service 的數據
+  // 處理來自 foreground service 的數據
   void _handleForegroundData(dynamic data) {
     debugPrint('📬 [UI] 收到原始訊息: $data');
 
@@ -79,9 +80,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
 
             // 更新狀態
             if (mounted) {
-              setState(() {
-                ref.read(targetDeviceVersionProvider.notifier).state = version;
-              });
+              ref.read(targetDeviceVersionProvider.notifier).state = version;
+              debugPrint('✅ [UI] 版本號已更新到 provider');
             }
           }
           break;
@@ -288,6 +288,12 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
 
   // ✅ 請求電池優化豁免
   Future<void> _requestBatteryOptimizationExemption() async {
+    // ✅ 只在 Android 上執行
+    if (!Platform.isAndroid) {
+      debugPrint('ℹ️ iOS 不需要電池優化豁免');
+      return;
+    }
+
     debugPrint('🔋 檢查電池優化狀態...');
 
     final status = await Permission.ignoreBatteryOptimizations.status;
@@ -483,6 +489,9 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
     final bleConnected = ref.watch(bleConnectionStateProvider);
     final params = ref.watch(correctionParamsProvider);
 
+    final deviceName = ref.watch(targetDeviceNameProvider);
+    final deviceVersion = ref.watch(targetDeviceVersionProvider);
+
     return Scaffold(
       appBar: AppBar(
         centerTitle: true,
@@ -626,10 +635,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 Text(
-                  '設備：${
-                      ref.watch(targetDeviceNameProvider).isEmpty ?
-                      '未輸入設備名稱':ref.watch(targetDeviceNameProvider)
-                  }',
+                  '設備：${deviceName.isEmpty ? '未輸入設備名稱' : deviceName}',
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     fontSize: 14,
@@ -638,10 +644,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> {
                 ),
                 SizedBox(width: 20,),
                 Text(
-                  '版本：${
-                      ref.watch(targetDeviceVersionProvider).isEmpty ?
-                      '設備未連接':ref.watch(targetDeviceVersionProvider)
-                  }',
+                  '版本：${deviceVersion.isEmpty ? '設備未連接' : deviceVersion}',
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     fontSize: 14,
