@@ -82,21 +82,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     }
   }
 
-  // void _setupDataCallback() {
-  //   debugPrint('🔧 [UI] 設置 data callback...');
-  //   print('test123 _setupDataCallback');
-  //
-  //   // ✅ 只在 Android 上設置 Foreground Task callback
-  //   if (Platform.isAndroid) {
-  //     print('test123 _setupDataCallback2');
-  //     FlutterForegroundTask.removeTaskDataCallback(_handleForegroundData);
-  //     FlutterForegroundTask.addTaskDataCallback(_handleForegroundData);
-  //     debugPrint('✅ [Android] data callback 設置完成');
-  //   } else {
-  //     debugPrint('ℹ️ [iOS] 跳過 foreground task callback');
-  //   }
-  // }
-
   void _handleForegroundData(dynamic data) {
     print('test123 versionUpdate');
     debugPrint('📬 [UI] 收到原始訊息: $data');
@@ -675,8 +660,458 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     super.dispose();
   }
 
+  // ✅ 導航到前一天
+  void _navigateToPrevDay(String prevDay) {
+    debugPrint('⬅️ 切換到前一天: $prevDay');
+    setState(() {
+      _dayKey = prevDay;
+    });
+    _toast('已切換到: $prevDay');
+  }
+
+  // ✅ 導航到後一天
+  void _navigateToNextDay(String nextDay) {
+    debugPrint('➡️ 切換到後一天: $nextDay');
+    setState(() {
+      _dayKey = nextDay;
+    });
+    _toast('已切換到: $nextDay');
+  }
+
+  // ✅ 選擇日期
+  Future<void> _selectDate() async {
+    try {
+      final currentDate = dayKeyToDate(_dayKey);
+
+      final picked = await showDatePicker(
+        context: context,
+        initialDate: currentDate,
+        firstDate: DateTime(2020),
+        lastDate: DateTime.now(),
+        helpText: '選擇日期',
+        cancelText: '取消',
+        confirmText: '確定',
+      );
+
+      if (picked != null) {
+        final newDayKey = dayKeyOf(picked);
+        debugPrint('📅 用戶選擇日期: $newDayKey');
+
+        // 檢查是否有數據
+        final repo = await ref.read(repoProvider.future);
+        final deviceName = ref.read(targetDeviceNameProvider);
+        final allDays = await repo.getAllDaysWithData(deviceName);
+
+        if (allDays.contains(newDayKey)) {
+          setState(() {
+            _dayKey = newDayKey;
+          });
+          _toast('已切換到: $newDayKey');
+        } else {
+          // 即使沒有數據也切換（會顯示空白圖表）
+          setState(() {
+            _dayKey = newDayKey;
+          });
+          _toast('$newDayKey\n此日期沒有數據');
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ 選擇日期失敗: $e');
+      _toast('日期選擇失敗');
+    }
+  }
+
+  // ✅ 測試資料庫和日期
+  Future<void> _testDatabaseAndDates() async {
+    try {
+      final repo = await ref.read(repoProvider.future);
+      final deviceName = ref.read(targetDeviceNameProvider);
+
+      debugPrint('═══════════════════════════════');
+      debugPrint('🧪 測試資料庫');
+      debugPrint('🧪 設備名稱: $deviceName');
+      debugPrint('🧪 當前日期: $_dayKey');
+
+      // 查詢當天數據
+      final samples = await repo.queryDay(deviceName, _dayKey);
+      debugPrint('🧪 當前日期數據筆數: ${samples.length}');
+
+      if (samples.isNotEmpty) {
+        debugPrint('🧪 第一筆時間: ${samples.first.ts}');
+        debugPrint('🧪 最後一筆時間: ${samples.last.ts}');
+      }
+
+      // 查詢所有有數據的日期
+      final allDays = await repo.getAllDaysWithData(deviceName);
+      debugPrint('🧪 有數據的日期數量: ${allDays.length}');
+      debugPrint('🧪 日期列表: $allDays');
+
+      // 查詢前後日期
+      final prev = await repo.prevDayWithData(deviceName, _dayKey);
+      final next = await repo.nextDayWithData(deviceName, _dayKey);
+      debugPrint('🧪 前一天: $prev');
+      debugPrint('🧪 後一天: $next');
+      debugPrint('═══════════════════════════════');
+
+      // 顯示對話框
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('資料庫測試結果'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('設備：$deviceName'),
+                  const Divider(),
+                  Text('當前日期：$_dayKey'),
+                  Text('數據筆數：${samples.length}'),
+                  const Divider(),
+                  Text('總共天數：${allDays.length}'),
+                  if (allDays.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    const Text('有數據的日期：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    ...allDays.map((day) => Text('  • $day')),
+                  ],
+                  const Divider(),
+                  Text('前一天：${prev ?? '無'}'),
+                  Text('後一天：${next ?? '無'}'),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('確定'),
+              ),
+            ],
+          ),
+        );
+      }
+
+      _toast('測試完成，請查看對話框和控制台');
+    } catch (e) {
+      debugPrint('❌ 測試失敗: $e');
+      _toast('測試失敗: $e');
+    }
+  }
+
+  // ✅ 調試特定日期的資料庫數據
+  Future<void> _debugDatabase(String deviceName, String dayKey) async {
+    try {
+      final repo = await ref.read(repoProvider.future);
+
+      debugPrint('═══════════════════════════════════════');
+      debugPrint('🔍 開始詳細調試');
+      debugPrint('🔍 查詢條件：');
+      debugPrint('   deviceName: "$deviceName"');
+      debugPrint('   dayKey: "$dayKey"');
+      debugPrint('═══════════════════════════════════════');
+
+      // 1. 查詢該日期的數據
+      final samples = await repo.queryDay(deviceName, dayKey);
+      debugPrint('📊 直接查詢結果: ${samples.length} 筆');
+
+      // 2. 查詢該設備所有數據（使用公共方法）
+      final allDeviceSamples = await repo.getAllSamplesByDevice(deviceName);
+      debugPrint('📊 該設備所有數據: ${allDeviceSamples.length} 筆');
+
+      // 3. 獲取所有設備 ID（使用公共方法）
+      final allDeviceIds = await repo.getAllDeviceIds();
+      debugPrint('📊 資料庫中所有設備 ID (${allDeviceIds.length} 個):');
+      for (final id in allDeviceIds) {
+        final count = await repo.getCountByDevice(id);
+        debugPrint('   - "$id": $count 筆');
+      }
+
+      // 4. 獲取所有日期（使用公共方法）
+      final allDayKeys = await repo.getAllDayKeys();
+      debugPrint('📊 資料庫中所有日期 (${allDayKeys.length} 個):');
+      for (final key in allDayKeys.take(10)) {
+        final count = await repo.getCountByDay(key);
+        debugPrint('   - "$key": $count 筆');
+      }
+      if (allDayKeys.length > 10) {
+        debugPrint('   ... 還有 ${allDayKeys.length - 10} 個日期');
+      }
+
+      // 5. 查詢該日期所有設備的數據（使用公共方法）
+      final samplesAllDevices = await repo.getAllSamplesByDay(dayKey);
+      debugPrint('📊 該日期 ($dayKey) 所有設備數據: ${samplesAllDevices.length} 筆');
+
+      if (samplesAllDevices.isNotEmpty) {
+        debugPrint('📊 該日期的設備列表:');
+        final deviceIds = samplesAllDevices.map((s) => s.deviceId).toSet();
+        for (final id in deviceIds) {
+          final count = samplesAllDevices.where((s) => s.deviceId == id).length;
+          debugPrint('   - "$id": $count 筆');
+        }
+      }
+
+      // 6. 查詢該設備前後的日期（使用公共方法）
+      final prev = await repo.prevDayWithData(deviceName, dayKey);
+      final next = await repo.nextDayWithData(deviceName, dayKey);
+      debugPrint('📊 該設備前一天: $prev');
+      debugPrint('📊 該設備後一天: $next');
+
+      // 7. 獲取統計信息（使用公共方法）
+      final stats = await repo.getDatabaseStats();
+      debugPrint('📊 資料庫統計:');
+      debugPrint('   總數據: ${stats['totalCount']}');
+      debugPrint('   設備數: ${stats['deviceCount']}');
+      debugPrint('   日期數: ${stats['dayCount']}');
+
+      // 8. 獲取診斷報告（使用公共方法）
+      final diagnosticInfo = await repo.getDiagnosticInfo();
+      debugPrint(diagnosticInfo);
+
+      debugPrint('═══════════════════════════════════════');
+
+      // 顯示詳細報告對話框
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Row(
+              children: [
+                Icon(Icons.bug_report, color: Colors.orange),
+                SizedBox(width: 8),
+                Text('調試報告'),
+              ],
+            ),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('查詢條件：', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 4),
+                  Text('  設備：$deviceName'),
+                  Text('  日期：$dayKey'),
+                  const Divider(height: 20),
+
+                  const Text('查詢結果：', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 4),
+                  Text(
+                    '  該日期該設備：${samples.length} 筆',
+                    style: TextStyle(
+                      color: samples.isEmpty ? Colors.red : Colors.green,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text('  該設備總數據：${allDeviceSamples.length} 筆'),
+                  Text('  該日期總數據：${samplesAllDevices.length} 筆'),
+                  const Divider(height: 20),
+
+                  const Text('資料庫統計：', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 4),
+                  Text('  總數據：${stats['totalCount']} 筆'),
+                  Text('  設備數量：${stats['deviceCount']} 個'),
+                  Text('  日期數量：${stats['dayCount']} 個'),
+                  const Divider(height: 20),
+
+                  if (allDeviceIds.isNotEmpty) ...[
+                    const Text('所有設備 ID：', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 4),
+                    ...allDeviceIds.map((id) => Padding(
+                      padding: const EdgeInsets.only(left: 8, top: 2),
+                      child: Text(
+                        '• "$id"',
+                        style: TextStyle(
+                          color: id == deviceName ? Colors.green : Colors.black,
+                          fontWeight: id == deviceName ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                    )),
+                    const Divider(height: 20),
+                  ],
+
+                  if (allDayKeys.isNotEmpty) ...[
+                    const Text('最近的日期：', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 4),
+                    ...allDayKeys.take(10).map((key) => Padding(
+                      padding: const EdgeInsets.only(left: 8, top: 2),
+                      child: Text(
+                        '• "$key"',
+                        style: TextStyle(
+                          color: key == dayKey ? Colors.green : Colors.black,
+                          fontWeight: key == dayKey ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                    )),
+                    if (allDayKeys.length > 10)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 8, top: 2),
+                        child: Text('  ... 還有 ${allDayKeys.length - 10} 個'),
+                      ),
+                    const Divider(height: 20),
+                  ],
+
+                  if (samplesAllDevices.isNotEmpty) ...[
+                    Text('該日期 ($dayKey) 的設備：',
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    const SizedBox(height: 4),
+                    ...samplesAllDevices.map((s) => s.deviceId).toSet().map((id) {
+                      final count = samplesAllDevices.where((s) => s.deviceId == id).length;
+                      return Padding(
+                        padding: const EdgeInsets.only(left: 8, top: 2),
+                        child: Text('• "$id": $count 筆'),
+                      );
+                    }),
+                  ],
+
+                  if (samples.isEmpty && (allDeviceSamples.isNotEmpty || samplesAllDevices.isNotEmpty)) ...[
+                    const Divider(height: 20),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.orange[50],
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.orange, width: 1),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.warning, color: Colors.orange, size: 20),
+                              SizedBox(width: 8),
+                              Text('可能的問題：', style: TextStyle(fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          if (samplesAllDevices.isEmpty && allDeviceSamples.isNotEmpty)
+                            const Text('• 該日期沒有任何設備的數據，但該設備有其他日期的數據'),
+                          if (samplesAllDevices.isNotEmpty && samples.isEmpty)
+                            const Text('• 該日期有數據，但設備名稱不匹配（請檢查設備名稱的大小寫和空格）'),
+                          if (allDeviceSamples.isEmpty)
+                            const Text('• 該設備在資料庫中完全沒有數據'),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('關閉'),
+              ),
+              if (samples.isEmpty && allDeviceSamples.isNotEmpty)
+                ElevatedButton(
+                  onPressed: () async {
+                    Navigator.pop(context);
+                    // 跳轉到該設備有數據的最近日期
+                    final days = await repo.getAllDaysWithData(deviceName);
+                    if (days.isNotEmpty) {
+                      setState(() {
+                        _dayKey = days.first;
+                      });
+                      _toast('已切換到該設備最近的日期: ${days.first}');
+                    }
+                  },
+                  child: const Text('跳到最近日期'),
+                ),
+            ],
+          ),
+        );
+      }
+    } catch (e, stack) {
+      debugPrint('❌ 調試失敗: $e');
+      debugPrint('堆棧: $stack');
+      _toast('調試失敗: $e');
+    }
+  }
+
+  // ✅ 添加清理無效數據的方法
+  Future<void> _cleanInvalidData() async {
+    try {
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.warning, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('清理無效數據'),
+            ],
+          ),
+          content: const Text(
+            '此操作將刪除資料庫中所有時間戳無效的數據（例如：1970-01-01）。\n\n'
+                '無效數據通常是由於系統錯誤或數據損壞產生的。\n\n'
+                '確定要繼續嗎？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('確定刪除'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirm != true) return;
+
+      _toast('開始清理...');
+
+      final repo = await ref.read(repoProvider.future);
+      final deletedCount = await repo.cleanInvalidTimestamps();
+
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Row(
+              children: [
+                Icon(
+                  deletedCount > 0 ? Icons.check_circle : Icons.info,
+                  color: deletedCount > 0 ? Colors.green : Colors.blue,
+                ),
+                const SizedBox(width: 8),
+                const Text('清理完成'),
+              ],
+            ),
+            content: Text(
+              deletedCount > 0
+                  ? '已刪除 $deletedCount 筆無效數據。\n\n建議重新啟動應用。'
+                  : '沒有發現無效數據。',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('確定'),
+              ),
+            ],
+          ),
+        );
+      }
+
+      // 強制刷新畫面
+      setState(() {});
+    } catch (e, stack) {
+      debugPrint('❌ 清理失敗: $e');
+      debugPrint('堆棧: $stack');
+      _toast('清理失敗: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    // ✅ 監聽版本號
+    ref.watch(versionListenerProvider);
+
     final repoAsync = ref.watch(repoProvider);
     final bleConnected = ref.watch(bleConnectionStateProvider);
     final params = ref.watch(correctionParamsProvider);
@@ -696,27 +1131,40 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('Potentiostat - CEMS100', style: TextStyle(color: Colors.white),),
+                  Text('Potentiostat - CEMS100', style: TextStyle(color: Colors.white)),
                 ],
               ),
             ),
             Align(
               alignment: Alignment.centerRight,
-              child: PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert),
-                onSelected: (value) {
-                  switch (value) {
-                    case 'deviceConfig':
-                      _showDeviceNameDialog();
-                      break;
-                    case 'fileExport':
-                      _handleQrScan();
-                      break;
-                  }
-                },
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'deviceConfig', child: Text('手動設定量測設備')),
-                  PopupMenuItem(value: 'fileExport', child: Text('量測資料匯出')),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  PopupMenuButton<String>(
+                    icon: const Icon(Icons.more_vert),
+                    onSelected: (value) {
+                      switch (value) {
+                        case 'deviceConfig':
+                          _showDeviceNameDialog();
+                          break;
+                        case 'fileExport':
+                          _handleQrScan();
+                          break;
+                        case 'cleanNunData':
+                          _cleanInvalidData();
+                          break;
+                        case 'testDatabase':
+                          _testDatabaseAndDates();
+                          break;
+                      }
+                    },
+                    itemBuilder: (context) => const [
+                      PopupMenuItem(value: 'deviceConfig', child: Text('手動設定量測設備')),
+                      PopupMenuItem(value: 'fileExport', child: Text('量測資料匯出')),
+                      PopupMenuItem(value: 'cleanNunData', child: Text('清理無效數據')),
+                      PopupMenuItem(value: 'testDatabase', child: Text('測試資料庫')),
+                    ],
+                  ),
                 ],
               ),
             ),
@@ -726,103 +1174,190 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
       body: SafeArea(
         child: repoAsync.when(
           data: (repo) {
-            final dayStream = repo.watchDay(
-              ref.read(targetDeviceNameProvider.notifier).state,
-              _dayKey,
-            );
-            return StreamBuilder<List<Sample>>(
-              stream: dayStream,
-              builder: (context, snap) {
-                final list = snap.data ?? const [];
-                return Column(
-                  children: [
-                    SizedBox(height: 10,),
-                    Expanded(
-                      child: GlucoseChart(
+            return Column(
+              key: ValueKey('main_$_dayKey'),  // ✅ 添加 Key 確保重建
+              children: [
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 16),
+                  color: Colors.grey[200],
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.calendar_today, size: 16, color: Colors.blue),
+                      const SizedBox(width: 8),
+                      Text(
+                        '當前日期：$_dayKey',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.blue,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+                // ✅ 曲線圖區域
+                Expanded(
+                  child: StreamBuilder<List<Sample>>(
+                    key: ValueKey('chart_$_dayKey'),
+                    stream: repo.watchDay(deviceName, _dayKey),
+                    builder: (context, snap) {
+                      // ✅ 非常詳細的調試輸出
+                      debugPrint('═══════════════════════════════════════');
+                      debugPrint('📊 [StreamBuilder] 當前狀態：');
+                      debugPrint('   dayKey: "$_dayKey"');
+                      debugPrint('   deviceName: "$deviceName"');
+                      debugPrint('   connectionState: ${snap.connectionState}');
+                      debugPrint('   hasData: ${snap.hasData}');
+                      debugPrint('   hasError: ${snap.hasError}');
+
+                      if (snap.hasError) {
+                        debugPrint('   錯誤: ${snap.error}');
+                        debugPrint('   堆棧: ${snap.stackTrace}');
+                      }
+
+                      final list = snap.data ?? const [];
+                      debugPrint('   數據筆數: ${list.length}');
+
+                      if (list.isNotEmpty) {
+                        debugPrint('   第一筆數據:');
+                        debugPrint('     - deviceId: "${list.first.deviceId}"');
+                        debugPrint('     - dayKey: "${list.first.dayKey}"');
+                        debugPrint('     - timestamp: ${list.first.ts}');
+                        debugPrint('   最後一筆數據:');
+                        debugPrint('     - deviceId: "${list.last.deviceId}"');
+                        debugPrint('     - dayKey: "${list.last.dayKey}"');
+                        debugPrint('     - timestamp: ${list.last.ts}');
+                      }
+                      debugPrint('═══════════════════════════════════════');
+
+                      // 如果沒有數據，顯示提示
+                      if (list.isEmpty && snap.connectionState == ConnectionState.active) {
+                        return Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              const Icon(Icons.inbox, size: 64, color: Colors.grey),
+                              const SizedBox(height: 16),
+                              Text(
+                                '$_dayKey\n此日期沒有數據',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(fontSize: 16, color: Colors.grey),
+                              ),
+                              const SizedBox(height: 16),
+                              // ✅ 添加調試按鈕
+                              ElevatedButton.icon(
+                                onPressed: () => _debugDatabase(deviceName, _dayKey),
+                                icon: const Icon(Icons.bug_report),
+                                label: const Text('調試此日期'),
+                              ),
+                            ],
+                          ),
+                        );
+                      }
+
+                      return GlucoseChart(
+                        key: ValueKey('glucose_$_dayKey'),
                         samples: list,
                         slope: params.slope,
                         intercept: params.intercept,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    FutureBuilder<List<String?>>(
-                      key: ValueKey(_dayKey),
-                      future: Future.wait<String?>([
-                        repo.prevDayWithData(
-                          ref.read(targetDeviceNameProvider.notifier).state,
-                          _dayKey,
-                        ),
-                        repo.nextDayWithData(
-                          ref.read(targetDeviceNameProvider.notifier).state,
-                          _dayKey,
-                        ),
-                      ]),
-                      builder: (context, s2) {
-                        final prev = s2.hasData ? s2.data![0] : null;
-                        final next = s2.hasData ? s2.data![1] : null;
-                        return Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            TextButton.icon(
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                // ✅ 日期導航按鈕
+                FutureBuilder<List<String?>>(
+                  key: ValueKey('nav_$_dayKey'),  // ✅ 添加 Key
+                  future: Future.wait<String?>([
+                    repo.prevDayWithData(deviceName, _dayKey),
+                    repo.nextDayWithData(deviceName, _dayKey),
+                  ]),
+                  builder: (context, s2) {
+                    final prev = s2.hasData ? s2.data![0] : null;
+                    final next = s2.hasData ? s2.data![1] : null;
+
+                    debugPrint('📅 [導航] 前一天: $prev');
+                    debugPrint('📅 [導航] 後一天: $next');
+
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          // ✅ 前一天按鈕
+                          Expanded(
+                            child: TextButton.icon(
                               onPressed: prev == null
                                   ? null
-                                  : () {
-                                Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                    builder: (_) => MeasureDetailScreen(
-                                      deviceId: ref.read(targetDeviceNameProvider.notifier).state,
-                                      dayKey: prev,
-                                    ),
-                                  ),
-                                );
-                              },
+                                  : () => _navigateToPrevDay(prev),
                               icon: const Icon(Icons.keyboard_double_arrow_left),
-                              label: const Text(''),
+                              label: Text(
+                                prev != null ? '前一天\n$prev' : '無更早\n資料',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                              style: TextButton.styleFrom(
+                                foregroundColor: prev == null ? Colors.grey : Colors.blue,
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                              ),
                             ),
-                            IconButton(
-                              onPressed: () async {
-                                final picked = await showDatePicker(
-                                  context: context,
-                                  initialDate: DateTime.now(),
-                                  firstDate: DateTime(2020),
-                                  lastDate: DateTime(2100),
-                                );
-                                if (picked != null) {
-                                  setState(() {
-                                    _dayKey = dayKeyOf(picked);
-                                  });
-                                }
-                              },
-                              icon: const Icon(Icons.calendar_month),
-                              tooltip: '選擇日期',
-                            ),
-                            TextButton.icon(
+                          ),
+                          // ✅ 日期選擇器按鈕
+                          IconButton(
+                            onPressed: _selectDate,
+                            icon: const Icon(Icons.calendar_month, size: 32),
+                            tooltip: '選擇日期',
+                            color: Colors.blue,
+                          ),
+                          // ✅ 後一天按鈕
+                          Expanded(
+                            child: TextButton.icon(
                               onPressed: next == null
                                   ? null
-                                  : () {
-                                Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                    builder: (_) => MeasureDetailScreen(
-                                      deviceId: ref.read(targetDeviceNameProvider.notifier).state,
-                                      dayKey: next,
-                                    ),
-                                  ),
-                                );
-                              },
+                                  : () => _navigateToNextDay(next),
                               icon: const Icon(Icons.keyboard_double_arrow_right),
-                              label: const Text(''),
+                              label: Text(
+                                next != null ? '後一天\n$next' : '無更新\n資料',
+                                textAlign: TextAlign.center,
+                                style: const TextStyle(fontSize: 11),
+                              ),
+                              style: TextButton.styleFrom(
+                                foregroundColor: next == null ? Colors.grey : Colors.blue,
+                                padding: const EdgeInsets.symmetric(vertical: 8),
+                              ),
                             ),
-                          ],
-                        );
-                      },
-                    ),
-                  ],
-                );
-              },
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ],
             );
           },
-          loading: () => const Center(child: CircularProgressIndicator()),
-          error: (e, _) => Center(child: Text('初始化失敗：$e')),
+          loading: () => const Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('正在初始化資料庫...'),
+              ],
+            ),
+          ),
+          error: (e, _) => Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.error, size: 64, color: Colors.red),
+                const SizedBox(height: 16),
+                Text('初始化失敗：$e'),
+              ],
+            ),
+          ),
         ),
       ),
       bottomNavigationBar: Column(
@@ -860,8 +1395,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
             currentIndex: _navIndex,
             type: BottomNavigationBarType.fixed,
             onTap: _onNavTapped,
-            selectedItemColor: Colors.white,      // 選中時 icon + label 變白色
-            unselectedItemColor: Colors.white,  // 未選中時 icon + label 淡白
+            selectedItemColor: Colors.white,
+            unselectedItemColor: Colors.white,
             items: [
               BottomNavigationBarItem(
                 icon: Icon(
@@ -873,17 +1408,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
                 tooltip: '藍芽連線/裝置管理',
               ),
               const BottomNavigationBarItem(
-                icon: Icon(Icons.qr_code_scanner, color: Colors.white,),
+                icon: Icon(Icons.qr_code_scanner, color: Colors.white),
                 label: '掃瞄',
                 tooltip: '掃描裝置 QR Code',
               ),
               const BottomNavigationBarItem(
-                icon: Icon(Icons.tune, color: Colors.white,),
+                icon: Icon(Icons.tune, color: Colors.white),
                 label: '平滑',
                 tooltip: '平滑處理/濾波設定',
               ),
               const BottomNavigationBarItem(
-                icon: Icon(Icons.settings, color: Colors.white,),
+                icon: Icon(Icons.settings, color: Colors.white),
                 label: '設定',
                 tooltip: '系統設定',
               ),
