@@ -18,6 +18,31 @@ class Sample {
 
   List<double>? currents; // 新增：儲存多個電流值的陣列
 
+  Sample copyWith({
+    Id? id,
+    String? deviceId,
+    int? seq,
+    DateTime? ts,
+    String? dayKey,
+    double? voltage,
+    double? current,
+    double? glucose,
+    double? temperature,
+    List<double>? currents,
+  }) {
+    return Sample()
+      ..id = id ?? this.id
+      ..deviceId = deviceId ?? this.deviceId
+      ..seq = seq ?? this.seq
+      ..ts = ts ?? this.ts
+      ..dayKey = dayKey ?? this.dayKey
+      ..voltage = voltage ?? this.voltage
+      ..current = current ?? this.current
+      ..glucose = glucose ?? this.glucose
+      ..temperature = temperature ?? this.temperature
+      ..currents = currents ?? this.currents;
+  }
+
   @override
   String toString() {
     return 'Sample('

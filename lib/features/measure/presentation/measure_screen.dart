@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/correction_params_provider.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/providers/device_info_providers.dart';
+import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/data_smoother.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/settings_dialog.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/smoothing_settings_dialog.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +11,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../../common/utils/date_key.dart';
 import '../ble/ble_connection_mode.dart';
 import '../data/isar_schemas.dart';
@@ -17,7 +19,6 @@ import '../data/measure_repository.dart';
 import '../foreground/foreground_ble_service.dart';
 import '../screens/qu_scan_screen.dart';
 import '../models/ble_device.dart';  // ✅ 加入
-import 'measure_detail_screen.dart';
 import 'providers/ble_providers.dart';
 import 'widgets/glucose_chart.dart';
 
@@ -35,29 +36,70 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
   String? _scannedDeviceName;
   Timer? _serviceMonitor;
 
-  // ✅ 新增：主線程 BLE 訂閱（iOS 必須，Android 備援）
-  StreamSubscription<BleDeviceData>? _mainThreadBleSubscription;
+  // ✅ 平滑設定（由 SharedPreferences 載入）
+  int smoothMethod = 0;     // '0' = 不套用, '1' = Smooth1, '2' = Smooth2
+  int smooth1Order = 5;          // Smooth1 的 order（移動平均窗口）
+  int smooth2Order = 7;          // Smooth2 的 order（例：Savitzky-Golay 或自定義）
+  double smooth2Error = 3.0;     // Smooth2 的允許誤差（自定義語意）
 
-  // ✅ 新增：去重緩存
-  final _recentTimestamps = <String, DateTime>{};
-  static const _cacheExpireDuration = Duration(seconds: 10);
-  static const _maxCacheSize = 200;
+  // ✅ 平滑後樣本（供圖表使用）
+  List<Sample> smooth1Samples = const [];
+  List<Sample> smooth2Samples = const [];
+
+  // ✅ 主線程 BLE 訂閱（iOS 必須，Android 備援）
+  StreamSubscription<BleDeviceData>? _mainThreadBleSubscription;
 
   @override
   void initState() {
     super.initState();
     _dayKey = dayKeyOf(DateTime.now());
 
-    _initForegroundService();
-
-    _loadScannedDevice();
-    _loadDeviceInfo();
-    // _setupDataCallback();
-
-    _checkForegroundServiceStatus();
+    // ✅ 集中處理所有異步初始化
+    _initializeAll();
 
     // ✅ 監聽 App 生命週期
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  // ✅ 統一處理所有異步初始化
+  Future<void> _initializeAll() async {
+    debugPrint('🚀 [initState] 開始初始化...');
+
+    try {
+      // 1. 初始化前景服務
+      debugPrint('📱 [1/4] 初始化前景服務...');
+      await _initForegroundService();
+      debugPrint('✅ [1/4] 前景服務初始化完成');
+
+      // 2. 載入掃描的設備
+      debugPrint('📱 [2/4] 載入掃描設備...');
+      await _loadScannedDevice();
+      debugPrint('✅ [2/4] 掃描設備載入完成');
+
+      // 3. 載入設備資訊
+      debugPrint('📱 [3/4] 載入設備資訊...');
+      await _loadDeviceInfo();
+      debugPrint('✅ [3/4] 設備資訊載入完成');
+
+      // 4. 載入平滑設定 ⭐ 關鍵步驟
+      debugPrint('📱 [4/4] 載入平滑設定...');
+      await _loadSmoothingPrefs();
+      debugPrint('✅ [4/4] 平滑設定載入完成');
+      debugPrint('   當前 smoothMethod: "$smoothMethod"');
+      debugPrint('   當前 smooth1Order: $smooth1Order');
+      debugPrint('   當前 smooth2Order: $smooth2Order');
+      debugPrint('   當前 smooth2Error: $smooth2Error');
+
+      // 5. 檢查前景服務狀態
+      debugPrint('📱 檢查前景服務狀態...');
+      await _checkForegroundServiceStatus();
+      debugPrint('✅ 前景服務狀態檢查完成');
+
+      debugPrint('🎉 所有初始化完成！');
+    } catch (e, stack) {
+      debugPrint('❌ 初始化失敗: $e');
+      debugPrint('堆棧: $stack');
+    }
   }
 
   // ✅ 新增：監聽 App 生命週期變化
@@ -177,6 +219,35 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     debugPrint('✅ [主線程] BLE 監聽已啟動');
   }
 
+  Future<void> _loadSmoothingPrefs() async {
+    final prefs = await SharedPreferences.getInstance();
+
+    // 讀取並輸出所有相關的 key
+    final keys = prefs.getKeys();
+    debugPrint('📋 SharedPreferences 中的所有 keys: $keys');
+
+    // 讀 smoothing_method，預設 '0' 表不套用
+    final method = prefs.getInt('smoothing_method') ?? 0;
+
+    print('test123 method: $method');
+
+    // 預設值：避免第一次沒有資料
+    final s1Order = prefs.getInt('smooth1_order') ?? 5;
+    final s2Order = prefs.getInt('smooth2_order') ?? 7;
+    final s2Error = prefs.getDouble('smooth2_error') ?? 3.0;
+
+    if (!mounted) return;
+    setState(() {
+      smoothMethod = method;
+      smooth1Order = s1Order;
+      smooth2Order = s2Order;
+      smooth2Error = s2Error;
+    });
+
+    debugPrint('🧮 載入平滑設定: method=$smoothMethod, '
+        'smooth1_order=$smooth1Order, smooth2_order=$smooth2Order, smooth2_error=$smooth2Error');
+  }
+
   Future<void> _initForegroundService() async {
     await ForegroundBleService.init();
 
@@ -289,6 +360,14 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
       } else {
         _toast('已套用 Smooth 2：Error=${result.smooth2Error}%、Order=${result.smooth2Order}');
       }
+
+      // ✅ 重新載入設定
+      await _loadSmoothingPrefs();
+
+      // ✅ 強制重建
+      if (mounted) {
+        setState(() {});
+      }
     }
   }
 
@@ -353,34 +432,60 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
   }
 
   Future<void> _requestBatteryOptimizationExemption() async {
-    if (!Platform.isAndroid) {
-      debugPrint('ℹ️ [iOS] 不需要電池優化豁免');
-      return;
-    }
+    if (!Platform.isAndroid) return;
 
-    debugPrint('🔋 [Android] 檢查電池優化狀態...');
+    debugPrint('🔋 檢查電池優化狀態...');
 
     final status = await Permission.ignoreBatteryOptimizations.status;
 
     if (!status.isGranted) {
-      debugPrint('⚠️ [Android] 需要請求電池優化豁免');
-
+      // ✅ 更明確的說明
       final shouldRequest = await showDialog<bool>(
         context: context,
+        barrierDismissible: false,  // ✅ 不允許點外面關閉
         builder: (context) => AlertDialog(
-          title: const Text('電池優化設定'),
-          content: const Text(
-            '為了讓藍芽服務能持續運行（最長 14 天），需要關閉電池優化。\n\n'
-                '這不會大幅增加耗電，但能確保服務不被系統終止。',
+          title: const Row(
+            children: [
+              Icon(Icons.battery_alert, color: Colors.orange),
+              SizedBox(width: 8),
+              Text('重要：電池優化設定'),
+            ],
+          ),
+          content: const SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '⚠️ 檢測到電池優化已啟用',
+                  style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red),
+                ),
+                SizedBox(height: 12),
+                Text('這會導致以下問題：'),
+                Text('• 螢幕關閉後數據停止接收'),
+                Text('• Service 被系統終止'),
+                Text('• 無法進行 14 天持續監測'),
+                SizedBox(height: 12),
+                Text(
+                  '必須關閉電池優化才能正常運行！',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  '這不會顯著增加耗電，請放心允許。',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                ),
+              ],
+            ),
           ),
           actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('取消'),
-            ),
             ElevatedButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('允許'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+              ),
+              child: const Text('立即設定'),
             ),
           ],
         ),
@@ -388,27 +493,99 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
 
       if (shouldRequest == true) {
         final result = await Permission.ignoreBatteryOptimizations.request();
+
         if (result.isGranted) {
-          debugPrint('✅ [Android] 電池優化豁免已授予');
-          _toast('已關閉電池優化');
+          debugPrint('✅ 電池優化豁免已授予');
+          _toast('✅ 電池優化已關閉');
         } else {
-          debugPrint('❌ [Android] 電池優化豁免被拒絕');
-          _toast('建議關閉電池優化以確保服務穩定運行');
+          // ❌ 如果被拒絕，顯示手動設定指引
+          _showManualBatterySettingsGuide();
         }
+      } else {
+        // ⚠️ 如果用戶拒絕，警告無法持續運行
+        _showBatteryOptimizationWarning();
       }
     } else {
-      debugPrint('✅ [Android] 電池優化已關閉');
+      debugPrint('✅ 電池優化已關閉');
     }
   }
 
-  void _startServiceMonitoring() {
+  // ✅ 顯示手動設定指引
+  void _showManualBatterySettingsGuide() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('需要手動設定'),
+        content: const SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('請按以下步驟手動關閉電池優化：'),
+              SizedBox(height: 12),
+              Text('1. 點擊下方「前往設定」'),
+              Text('2. 找到本 App'),
+              Text('3. 選擇「不優化」或「無限制」'),
+              SizedBox(height: 12),
+              Text(
+                '⚠️ 如不設定，螢幕關閉後將停止接收數據',
+                style: TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              Navigator.pop(context);
+              await openAppSettings();
+            },
+            child: const Text('前往設定'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ✅ 警告用戶後果
+  void _showBatteryOptimizationWarning() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.warning, color: Colors.red),
+            SizedBox(width: 8),
+            Text('警告'),
+          ],
+        ),
+        content: const Text(
+          '未關閉電池優化，螢幕關閉後將無法接收數據。\n\n'
+              '建議您稍後在「設定 → 電池 → 本 App」中手動關閉優化。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('我知道了'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _startServiceMonitoring() async {
     if (!Platform.isAndroid) return;
 
     _serviceMonitor?.cancel();
 
     debugPrint('👀 [Android] 開始監控服務狀態...');
 
-    _serviceMonitor = Timer.periodic(const Duration(seconds: 10), (timer) async {
+    // ✅ 縮短檢查間隔（10秒 → 5秒）
+    _serviceMonitor = Timer.periodic(const Duration(seconds: 5), (timer) async {
       final isRunning = await ForegroundBleService.isRunning();
       final shouldBeRunning = ref.read(bleConnectionStateProvider);
 
@@ -416,35 +593,59 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
         debugPrint('⚠️ [Android] 檢測到服務已停止，嘗試重啟...');
 
         final prefs = await SharedPreferences.getInstance();
-        final wasTerminated = prefs.getBool('service_terminated') ?? false;
 
-        if (wasTerminated) {
-          debugPrint('🔄 [Android] 服務被系統終止，執行重啟...');
-          await prefs.setBool('service_terminated', false);
+        // ✅ 記錄服務停止時間
+        final now = DateTime.now();
+        await prefs.setString('last_service_stop', now.toIso8601String());
 
-          final modeIndex = prefs.getInt('ble_connection_mode') ?? 0;
-          final mode = BleConnectionMode.values[modeIndex];
-          final deviceName = prefs.getString('device_name');
-          final deviceId = prefs.getString('target_device_id');
+        final modeIndex = prefs.getInt('ble_connection_mode') ?? 0;
+        final mode = BleConnectionMode.values[modeIndex];
+        final deviceName = prefs.getString('device_name');
+        final deviceId = prefs.getString('target_device_id');
 
-          if (deviceName != null && deviceName.isNotEmpty) {
-            final success = await ForegroundBleService.start(
-              targetDeviceId: deviceId,
-              targetDeviceName: deviceName,
-              mode: mode,
-            );
+        if (deviceName != null && deviceName.isNotEmpty) {
+          debugPrint('🔄 [Android] 執行自動重啟...');
+          debugPrint('   設備: $deviceName');
+          debugPrint('   模式: $mode');
+          debugPrint('   時間: $now');
 
-            if (success) {
-              debugPrint('✅ [Android] 服務重啟成功');
-              _toast('藍芽服務已自動重啟');
-            } else {
-              debugPrint('❌ [Android] 服務重啟失敗');
-              _toast('服務重啟失敗，請手動重新連線');
-              ref.read(bleConnectionStateProvider.notifier).state = false;
-              timer.cancel();
+          final success = await ForegroundBleService.start(
+            targetDeviceId: deviceId,
+            targetDeviceName: deviceName,
+            mode: mode,
+          );
+
+          if (success) {
+            debugPrint('✅ [Android] 服務重啟成功');
+
+            // ✅ 確保 WakeLock 還在
+            final isEnabled = await WakelockPlus.enabled;
+            if (!isEnabled) {
+              await WakelockPlus.enable();
+              debugPrint('🔒 重新啟用 WakeLock');
             }
+
+            if (mounted) {
+              _toast('藍芽服務已自動重啟');
+            }
+
+            // ✅ 記錄重啟成功
+            await prefs.setString('last_service_restart', now.toIso8601String());
+
+          } else {
+            debugPrint('❌ [Android] 服務重啟失敗');
+
+            if (mounted) {
+              _toast('服務重啟失敗，請手動重新連線');
+            }
+
+            ref.read(bleConnectionStateProvider.notifier).state = false;
+            timer.cancel();
           }
         }
+      } else if (isRunning && shouldBeRunning) {
+        // ✅ 定期記錄健康檢查
+        debugPrint('💚 [Android] 服務運行正常');
       }
     });
   }
@@ -468,6 +669,10 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
 
       final success = await ForegroundBleService.stopSafely();
 
+      // ✅ 釋放 WakeLock
+      await WakelockPlus.disable();
+      debugPrint('🔓 已釋放 WakeLock');
+
       if (success) {
         ref.read(bleConnectionStateProvider.notifier).state = false;
         _toast('已停止藍芽監聽');
@@ -477,11 +682,15 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
       }
     } else {
       // 啟動服務
-
       // ✅ Android：請求電池優化豁免
       if (Platform.isAndroid) {
         await _requestBatteryOptimizationExemption();
       }
+
+      // ✅ 啟動 WakeLock（保持 CPU 運行）
+      await WakelockPlus.enable();
+      debugPrint('🔒 已啟用 WakeLock');
+      _toast('已啟用防休眠');
 
       debugPrint('📋 開始請求藍芽權限...');
       final hasPermission = await bleService.requestPermissions();
@@ -1107,6 +1316,45 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     }
   }
 
+  // ---- helpers: 用 DataSmoother 生成平滑樣本 ----
+
+  List<Sample> buildSmooth1Samples(List<Sample> raw, int order) {
+    if (raw.isEmpty) return const [];
+
+    // 以時間排序，確保移動窗正確（若 repo 已保證排序可省略）
+    final src = [...raw]..sort((a, b) => a.ts.compareTo(b.ts));
+
+    final smoother = DataSmoother();
+    final out = <Sample>[];
+
+    for (final s in src) {
+      final v = s.current; // 電流欄位
+      smoother.addData(v!);
+
+      final sm = smoother.smooth1(order) ?? v; // 前幾筆不足時用原值保底
+      out.add(s.copyWith(current: sm));
+    }
+    return out;
+  }
+
+  List<Sample> buildSmooth2Samples(List<Sample> raw, int order, double errorPercent) {
+    if (raw.isEmpty) return const [];
+
+    final src = [...raw]..sort((a, b) => a.ts.compareTo(b.ts));
+
+    final smoother = DataSmoother();
+    final out = <Sample>[];
+
+    for (final s in src) {
+      final v = s.current; // 電流欄位
+      smoother.addData(v!);
+
+      final sm = smoother.smooth2(order, errorPercent) ?? v;
+      out.add(s.copyWith(current: sm));         // ← 若沒有 copyWith，請改用你的建構子
+    }
+    return out;
+  }
+
   @override
   Widget build(BuildContext context) {
     // ✅ 監聽版本號
@@ -1119,11 +1367,91 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     final deviceName = ref.watch(targetDeviceNameProvider);
     final deviceVersion = ref.watch(targetDeviceVersionProvider);
 
+    Widget _buildStatusRow(String label, bool isOk) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Icon(
+              isOk ? Icons.check_circle : Icons.cancel,
+              color: isOk ? Colors.green : Colors.red,
+              size: 20,
+            ),
+            const SizedBox(width: 8),
+            Text(label),
+          ],
+        ),
+      );
+    }
+
+    // ✅ 顯示服務狀態
+    void _showServiceStatusDialog() async {
+      final prefs = await SharedPreferences.getInstance();
+      final isRunning = await ForegroundBleService.isRunning();
+      final wakeLockEnabled = await WakelockPlus.enabled;
+      final batteryOptimization = await Permission.ignoreBatteryOptimizations.status;
+
+      final lastStop = prefs.getString('last_service_stop');
+      final lastRestart = prefs.getString('last_service_restart');
+
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('服務狀態診斷'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildStatusRow('前景服務', isRunning),
+                  _buildStatusRow('WakeLock', wakeLockEnabled),
+                  _buildStatusRow('電池優化豁免', batteryOptimization.isGranted),
+                  const Divider(),
+                  if (lastStop != null) ...[
+                    const Text('最後停止時間：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    Text(lastStop, style: const TextStyle(fontSize: 12)),
+                    const SizedBox(height: 4),
+                  ],
+                  if (lastRestart != null) ...[
+                    const Text('最後重啟時間：', style: TextStyle(fontWeight: FontWeight.bold)),
+                    Text(lastRestart, style: const TextStyle(fontSize: 12)),
+                  ],
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('關閉'),
+              ),
+            ],
+          ),
+        );
+      }
+    }
+
     return Scaffold(
       appBar: AppBar(
         backgroundColor: Colors.pink,
         centerTitle: true,
         automaticallyImplyLeading: false,
+        leading: FutureBuilder<bool>(
+          future: WakelockPlus.enabled,
+          builder: (context, snapshot) {
+            final isEnabled = snapshot.data ?? false;
+            return IconButton(
+              icon: Icon(
+                isEnabled ? Icons.lock_open : Icons.lock,
+                color: isEnabled ? Colors.green : Colors.grey,
+              ),
+              tooltip: isEnabled ? 'WakeLock 已啟用' : 'WakeLock 未啟用',
+              onPressed: () {
+                _showServiceStatusDialog();
+              },
+            );
+          },
+        ),
         title: Stack(
           alignment: Alignment.center,
           children: [
@@ -1217,9 +1545,53 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
                         debugPrint('   錯誤: ${snap.error}');
                         debugPrint('   堆棧: ${snap.stackTrace}');
                       }
+                      print('test123 smoothMethod: $smoothMethod');
 
                       final list = snap.data ?? const [];
                       debugPrint('   數據筆數: ${list.length}');
+
+                      // 依 method 動態產生平滑樣本
+                      final smooth1Samples = (smoothMethod == 1)
+                          ? buildSmooth1Samples(list, smooth1Order)
+                          : const <Sample>[];
+
+                      final smooth2Samples = (smoothMethod == 2)
+                          ? buildSmooth2Samples(list, smooth2Order, smooth2Error)
+                          : const <Sample>[];
+
+                      print('test123 smooth1Samples: $smooth1Samples');
+                      print('test123 smooth2Samples: $smooth2Samples');
+
+                      LineDataConfig? buildSecondLine() {
+                        if (smoothMethod == 1) {
+                          return LineDataConfig(
+                            id: 'smooth1',
+                            label: 'Smooth 1',
+                            color: Colors.green,
+                            samples: smooth1Samples,
+                            slope: params.slope,
+                            intercept: params.intercept,
+                          );
+                        } else if (smoothMethod == 2) {
+                          return LineDataConfig(
+                            id: 'smooth2',
+                            label: 'Smooth 2',
+                            color: Colors.orange,
+                            samples: smooth2Samples,
+                            slope: params.slope,
+                            intercept: params.intercept,
+                          );
+                        }
+                        return null;
+                      }
+
+                      final secondLine = buildSecondLine();
+
+                      // 只把額外的線放進 additionalLines
+                      final additionalLines = <LineDataConfig>[];
+                      if (secondLine != null) {
+                        additionalLines.add(secondLine);
+                      }
 
                       if (list.isNotEmpty) {
                         debugPrint('   第一筆數據:');
@@ -1258,12 +1630,13 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
                         );
                       }
 
-                      return GlucoseChart(
-                        key: ValueKey('glucose_$_dayKey'),
-                        samples: list,
-                        slope: params.slope,
-                        intercept: params.intercept,
-                      );
+                      return // 使用方式
+                        GlucoseChart(
+                          samples: list,  // 主線使用原始數據
+                          slope: params.slope,
+                          intercept: params.intercept,
+                          additionalLines: additionalLines.isEmpty ? null : additionalLines,
+                        );
                     },
                   ),
                 ),

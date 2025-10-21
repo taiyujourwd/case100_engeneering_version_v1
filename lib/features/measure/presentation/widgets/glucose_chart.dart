@@ -7,6 +7,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../data/isar_schemas.dart';
 import '../providers/current_glucose_providers.dart';
 
+/// 曲線數據配置
+class LineDataConfig {
+  final String id;
+  final String label;
+  final Color color;
+  final List<Sample> samples;
+  final double slope;
+  final double intercept;
+  final bool showDots;
+
+  const LineDataConfig({
+    required this.id,
+    required this.label,
+    required this.color,
+    required this.samples,
+    this.slope = 600.0,
+    this.intercept = 0.0,
+    this.showDots = true,
+  });
+}
+
 /// 雙 Y 軸曲線圖：左軸=血糖(mg/dL)、右軸=電流(nA)
 /// - 換算關係:血糖(mg/dL) = slope × 電流(A) × 1E8 + intercept
 /// - Y軸範圍由 Riverpod Provider 控制（固定）
@@ -15,11 +36,15 @@ import '../providers/current_glucose_providers.dart';
 /// - 同一天延續繪製，不同天清空重新開始
 /// - 支持手勢縮放和滑動查看歷史
 /// - 點擊曲線顯示該點詳細資訊，並繪製虛線到X/Y軸
+/// - **新增：支援多條曲線繪製**
 class GlucoseChart extends ConsumerStatefulWidget {
   final List<Sample> samples;
   final double placeholderCurrentA;
   final double slope;
   final double intercept;
+
+  // 多曲線配置
+  final List<LineDataConfig>? additionalLines;
 
   const GlucoseChart({
     super.key,
@@ -27,6 +52,7 @@ class GlucoseChart extends ConsumerStatefulWidget {
     this.placeholderCurrentA = 0.0,
     this.slope = 600.0,
     this.intercept = 0.0,
+    this.additionalLines,
   });
 
   @override
@@ -61,12 +87,14 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   double _windowWidthBeforeScale = defaultWindowMs;
 
   // 觸摸點狀態
+  String? _touchedLineId;  // 新增：記錄被觸摸的線ID
   double? _touchedY;
   double? _touchedX;
   String? _tooltipText;
 
-  // 保存原始採樣數據
+  // 保存原始採樣數據（支援多條線）
   List<FlSpot> _rawCurrentSpots = [];
+  final Map<String, List<FlSpot>> _rawSpotsMap = {};
 
   // 記錄當前繪圖的日期
   DateTime? _currentPlotDate;
@@ -88,19 +116,59 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         setState(() {});
       }
     }
+
+    print('test123 additionalLines: ${widget.additionalLines}');
+
+    // 檢查額外線的參數變化
+    if (widget.additionalLines != null) {
+      bool hasChanged = false;
+      for (int i = 0; i < widget.additionalLines!.length; i++) {
+        if (oldWidget.additionalLines != null &&
+            i < oldWidget.additionalLines!.length) {
+          final oldConfig = oldWidget.additionalLines![i];
+          final newConfig = widget.additionalLines![i];
+          if (oldConfig.slope != newConfig.slope ||
+              oldConfig.intercept != newConfig.intercept) {
+            hasChanged = true;
+            break;
+          }
+        }
+      }
+      if (hasChanged && mounted) {
+        setState(() {});
+      }
+    }
   }
 
   void _initializeWindow() {
     DateTime startTime;
 
+    // 從主線和額外線中找到最早的數據時間
+    DateTime? earliestTime;
+
     if (widget.samples.isNotEmpty) {
-      _firstDataTime = widget.samples.first.ts;
+      earliestTime = widget.samples.first.ts;
+    }
+
+    if (widget.additionalLines != null) {
+      for (final config in widget.additionalLines!) {
+        if (config.samples.isNotEmpty) {
+          final firstTime = config.samples.first.ts;
+          if (earliestTime == null || firstTime.isBefore(earliestTime)) {
+            earliestTime = firstTime;
+          }
+        }
+      }
+    }
+
+    if (earliestTime != null) {
+      _firstDataTime = earliestTime;
       startTime = DateTime(
-        _firstDataTime!.year,
-        _firstDataTime!.month,
-        _firstDataTime!.day,
-        _firstDataTime!.hour,
-        _firstDataTime!.minute,
+        earliestTime.year,
+        earliestTime.month,
+        earliestTime.day,
+        earliestTime.hour,
+        earliestTime.minute,
         0,
         0,
       );
@@ -127,9 +195,28 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       _isManualMode = false;
       _currentWindowWidthMs = defaultWindowMs;
       _initializeWindow();
+
+      // 檢查主線和額外線的最新數據
+      double? latestX;
+
       final todaySamples = _filterTodaySamples(widget.samples);
       if (todaySamples.isNotEmpty) {
-        final latestX = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
+        latestX = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
+      }
+
+      if (widget.additionalLines != null) {
+        for (final config in widget.additionalLines!) {
+          final samples = _filterTodaySamples(config.samples);
+          if (samples.isNotEmpty) {
+            final x = samples.last.ts.millisecondsSinceEpoch.toDouble();
+            if (latestX == null || x > latestX) {
+              latestX = x;
+            }
+          }
+        }
+      }
+
+      if (latestX != null) {
         _advanceWindowIfNeeded(latestX);
       }
     });
@@ -144,11 +231,34 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       final newStartMs = _tStartMs - delta * dragSensitivity;
       final newEndMs = _tEndMs - delta * dragSensitivity;
 
+      // 從所有線中找出數據範圍
+      double? firstDataMs;
+      double? lastDataMs;
+
       final todaySamples = _filterTodaySamples(widget.samples);
       if (todaySamples.isNotEmpty) {
-        final firstDataMs = todaySamples.first.ts.millisecondsSinceEpoch.toDouble();
-        final lastDataMs = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
+        firstDataMs = todaySamples.first.ts.millisecondsSinceEpoch.toDouble();
+        lastDataMs = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
+      }
 
+      if (widget.additionalLines != null) {
+        for (final config in widget.additionalLines!) {
+          final samples = _filterTodaySamples(config.samples);
+          if (samples.isNotEmpty) {
+            final firstMs = samples.first.ts.millisecondsSinceEpoch.toDouble();
+            final lastMs = samples.last.ts.millisecondsSinceEpoch.toDouble();
+
+            if (firstDataMs == null || firstMs < firstDataMs) {
+              firstDataMs = firstMs;
+            }
+            if (lastDataMs == null || lastMs > lastDataMs) {
+              lastDataMs = lastMs;
+            }
+          }
+        }
+      }
+
+      if (firstDataMs != null && lastDataMs != null) {
         if (newStartMs < firstDataMs) {
           _tStartMs = firstDataMs;
           _tEndMs = _tStartMs + windowWidth;
@@ -239,6 +349,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         _touchedY = null;
         _touchedX = null;
         _tooltipText = null;
+        _touchedLineId = null;
 
         // 計算初始距離
         final positions = _pointers.values.toList();
@@ -394,16 +505,20 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     }).toList();
   }
 
-  double _currentToGlucose(double currentAmperes) {
-    return widget.slope * (currentAmperes * 1E8) + widget.intercept;
+  double _currentToGlucose(double currentAmperes, {double? slope, double? intercept}) {
+    final s = slope ?? widget.slope;
+    final i = intercept ?? widget.intercept;
+    return s * (currentAmperes * 1E8) + i;
   }
 
-  double _glucoseToCurrent(double glucose) {
-    if (widget.slope == 0) return 0;
-    return (glucose - widget.intercept) / widget.slope;
+  double _glucoseToCurrent(double glucose, {double? slope, double? intercept}) {
+    final s = slope ?? widget.slope;
+    if (s == 0) return 0;
+    final i = intercept ?? widget.intercept;
+    return (glucose - i) / s;
   }
 
-  List<LineChartBarData> _buildContinuousSegments(List<FlSpot> spots) {
+  List<LineChartBarData> _buildContinuousSegments(List<FlSpot> spots, Color color) {
     if (spots.length < 2) return [];
 
     const gapThresholdMs = 90 * 1000.0;
@@ -431,7 +546,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
             isCurved: false,
             isStrokeCapRound: true,
             barWidth: 2,
-            color: Colors.blue,
+            color: color,
             dotData: const FlDotData(show: false),
             belowBarData: BarAreaData(show: false),
           ));
@@ -443,7 +558,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     return segments;
   }
 
-  List<LineChartBarData> _buildGapSegments(List<FlSpot> spots) {
+  List<LineChartBarData> _buildGapSegments(List<FlSpot> spots, Color color) {
     if (spots.length < 2) return [];
 
     const gapThresholdMs = 90 * 1000.0;
@@ -464,7 +579,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
               spots: [prev, curr],
               isCurved: false,
               barWidth: 1.5,
-              color: Colors.blue.withOpacity(0.5),
+              color: color.withOpacity(0.5),
               dotData: const FlDotData(show: false),
               belowBarData: BarAreaData(show: false),
               dashArray: [5, 5],
@@ -531,34 +646,50 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   Widget build(BuildContext context) {
     final glucoseRange = ref.watch(glucoseRangeProvider);
 
-    final todaySamples = _filterTodaySamples(widget.samples);
-    final hasData = todaySamples.isNotEmpty;
+    // 檢查是否需要重置（基於所有線的最新日期）
+    DateTime? latestDateOverall;
 
     if (widget.samples.isNotEmpty) {
-      final latestDate = widget.samples.last.ts;
-      if (_shouldReset(latestDate)) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) {
-            setState(() {
-              _isManualMode = false;
-              _currentWindowWidthMs = defaultWindowMs;
-              _firstDataTime = null;
-              _touchedY = null;
-              _touchedX = null;
-              _tooltipText = null;
-              _initializeWindow();
-            });
+      latestDateOverall = widget.samples.last.ts;
+    }
+
+    if (widget.additionalLines != null) {
+      for (final config in widget.additionalLines!) {
+        if (config.samples.isNotEmpty) {
+          final date = config.samples.last.ts;
+          if (latestDateOverall == null || date.isAfter(latestDateOverall)) {
+            latestDateOverall = date;
           }
-        });
+        }
       }
     }
 
-    final latestSample = hasData ? todaySamples.last : null;
+    if (latestDateOverall != null && _shouldReset(latestDateOverall)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {
+            _isManualMode = false;
+            _currentWindowWidthMs = defaultWindowMs;
+            _firstDataTime = null;
+            _touchedY = null;
+            _touchedX = null;
+            _tooltipText = null;
+            _touchedLineId = null;
+            _initializeWindow();
+          });
+        }
+      });
+    }
+
+    final todaySamples = _filterTodaySamples(widget.samples);
+    final hasData = todaySamples.isNotEmpty;
 
     if (hasData && _firstDataTime == null) {
       _firstDataTime = todaySamples.first.ts;
       _initializeWindow();
     }
+
+    final latestSample = hasData ? todaySamples.last : null;
 
     final voltage = latestSample?.voltage;
     final temperature = latestSample?.temperature;
@@ -579,6 +710,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         : currentA.toStringAsFixed(6))
         : '--';
 
+    // 處理主線數據
     final currBasisSpots = () {
       if (!hasData) {
         _rawCurrentSpots = _buildPlaceholderSpots(
@@ -608,6 +740,36 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         .map((p) => FlSpot(p.x, _currentToGlucose(p.y)))
         .toList();
 
+    // 處理額外的線
+    final List<List<FlSpot>> additionalGlucoseSpots = [];
+
+    if (widget.additionalLines != null) {
+      for (final config in widget.additionalLines!) {
+        final samples = _filterTodaySamples(config.samples);
+        final spots = samples.isNotEmpty
+            ? _mapToSortedSpots(samples, (s) => _getCurrent(s))
+            : <FlSpot>[];
+
+        _rawSpotsMap[config.id] = spots;
+
+        if (samples.isNotEmpty) {
+          final latestX = samples.last.ts.millisecondsSinceEpoch.toDouble();
+          _advanceWindowIfNeeded(latestX);
+        }
+
+        var win = _applyWindowFixed(spots);
+        if (win.isEmpty) {
+          win = [];
+        }
+
+        final glucoseSpots = win
+            .map((p) => FlSpot(p.x, _currentToGlucose(p.y, slope: config.slope, intercept: config.intercept)))
+            .toList();
+
+        additionalGlucoseSpots.add(glucoseSpots);
+      }
+    }
+
     double? safeMin = glucoseRange.min;
     double? safeMax = glucoseRange.max;
 
@@ -623,15 +785,26 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       }
     }
 
-    if (!hasDataInWindow) {
+    if (!hasDataInWindow && additionalGlucoseSpots.every((s) => s.isEmpty)) {
       if (safeMin == null || safeMax == null) {
         safeMin = 0.0;
         safeMax = 400.0;
       }
     }
 
+    // 收集所有線的Y值來計算範圍
+    final allYValues = <double>[];
+    if (hasDataInWindow) {
+      allYValues.addAll(glucoseFromCurrentWin.map((e) => e.y));
+    }
+    for (final spots in additionalGlucoseSpots) {
+      if (spots.isNotEmpty) {
+        allYValues.addAll(spots.map((e) => e.y));
+      }
+    }
+
     final gluRange = _calcRange(
-      hasDataInWindow ? glucoseFromCurrentWin.map((e) => e.y) : [safeMin ?? 0, safeMax ?? 400],
+      allYValues.isNotEmpty ? allYValues : [safeMin ?? 0, safeMax ?? 400],
       fixedMin: safeMin,
       fixedMax: safeMax,
       targetTicks: 12,
@@ -648,6 +821,10 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
     final timeInterval = _calculateTimeInterval();
 
+    // 構建所有線的 LineChartBarData
+    final List<LineChartBarData> allLineBars = [];
+
+    // 隱形基線
     final invisibleBaseline = LineChartBarData(
       spots: [
         FlSpot(minX, gluRange.min),
@@ -659,6 +836,66 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       dotData: const FlDotData(show: false),
       belowBarData: BarAreaData(show: false),
     );
+    allLineBars.add(invisibleBaseline);
+
+    // 主線（藍色）
+    if (hasDataInWindow && glucoseFromCurrentWin.length >= 2) {
+      allLineBars.addAll(_buildContinuousSegments(glucoseFromCurrentWin, Colors.blue));
+      allLineBars.addAll(_buildGapSegments(glucoseFromCurrentWin, Colors.blue));
+    }
+
+    if (hasDataInWindow) {
+      allLineBars.add(LineChartBarData(
+        spots: glucoseFromCurrentWin,
+        isCurved: false,
+        barWidth: 0,
+        color: Colors.transparent,
+        dotData: FlDotData(
+          show: true,
+          getDotPainter: (spot, percent, barData, index) {
+            return FlDotCirclePainter(
+              radius: 3,
+              color: Colors.blue,
+              strokeWidth: 1.5,
+              strokeColor: Colors.white,
+            );
+          },
+        ),
+      ));
+    }
+
+    // 額外的線
+    if (widget.additionalLines != null) {
+      for (int i = 0; i < widget.additionalLines!.length; i++) {
+        final config = widget.additionalLines![i];
+        final glucoseSpots = additionalGlucoseSpots[i];
+
+        if (glucoseSpots.length >= 2) {
+          allLineBars.addAll(_buildContinuousSegments(glucoseSpots, config.color));
+          allLineBars.addAll(_buildGapSegments(glucoseSpots, config.color));
+        }
+
+        if (glucoseSpots.isNotEmpty && config.showDots) {
+          allLineBars.add(LineChartBarData(
+            spots: glucoseSpots,
+            isCurved: false,
+            barWidth: 0,
+            color: Colors.transparent,
+            dotData: FlDotData(
+              show: true,
+              getDotPainter: (spot, percent, barData, index) {
+                return FlDotCirclePainter(
+                  radius: 3,
+                  color: config.color,
+                  strokeWidth: 1.5,
+                  strokeColor: Colors.white,
+                );
+              },
+            ),
+          ));
+        }
+      }
+    }
 
     return Column(
       children: [
@@ -718,33 +955,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                     minY: gluRange.min,
                     maxY: gluRange.max,
                     clipData: const FlClipData(left: true, top: true, right: true, bottom: true),
-                    lineBarsData: [
-                      invisibleBaseline,
-                      if (hasDataInWindow && glucoseFromCurrentWin.length >= 2) ...[
-                        ..._buildContinuousSegments(glucoseFromCurrentWin),
-                      ],
-                      if (hasDataInWindow && glucoseFromCurrentWin.length >= 2) ...[
-                        ..._buildGapSegments(glucoseFromCurrentWin),
-                      ],
-                      if (hasDataInWindow)
-                        LineChartBarData(
-                          spots: glucoseFromCurrentWin,
-                          isCurved: false,
-                          barWidth: 0,
-                          color: Colors.transparent,
-                          dotData: FlDotData(
-                            show: true,
-                            getDotPainter: (spot, percent, barData, index) {
-                              return FlDotCirclePainter(
-                                radius: 3,
-                                color: Colors.blue,
-                                strokeWidth: 1.5,
-                                strokeColor: Colors.white,
-                              );
-                            },
-                          ),
-                        ),
-                    ],
+                    lineBarsData: allLineBars,
                     gridData: FlGridData(
                       show: true,
                       drawVerticalLine: true,
@@ -837,9 +1048,14 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                       ),
                       getTouchedSpotIndicator: (barData, spotIndexes) {
                         return spotIndexes.map((index) {
+                          Color indicatorColor = Colors.blue;
+                          if (barData.color != null && barData.color != Colors.transparent) {
+                            indicatorColor = barData.color!;
+                          }
+
                           return TouchedSpotIndicatorData(
                             FlLine(
-                              color: Colors.blue.withOpacity(0.8),
+                              color: indicatorColor.withOpacity(0.8),
                               strokeWidth: 2,
                               dashArray: [5, 5],
                             ),
@@ -848,7 +1064,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                               getDotPainter: (spot, percent, barData, index) {
                                 return FlDotCirclePainter(
                                   radius: 6,
-                                  color: Colors.blue,
+                                  color: indicatorColor,
                                   strokeWidth: 3,
                                   strokeColor: Colors.white,
                                 );
@@ -873,14 +1089,50 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                               _touchedX = null;
                               _touchedY = null;
                               _tooltipText = null;
+                              _touchedLineId = null;
                             });
                           } else {
-                            final hit = spots.first;
+                            // 找出被點擊的線（優先選擇有顏色的線，跳過隱形基線）
+                            LineBarSpot? selectedSpot;
+                            for (final spot in spots) {
+                              if (spot.bar.color != null &&
+                                  spot.bar.color != Colors.transparent) {
+                                selectedSpot = spot;
+                                break;
+                              }
+                            }
+
+                            if (selectedSpot == null) return;
+
+                            final hit = selectedSpot;
                             final hitX = hit.x;
 
+                            // 判斷是主線還是額外線
+                            bool isMainLine = hit.bar.color == Colors.blue;
+                            String lineLabel = '主線';
+                            double lineSlope = widget.slope;
+                            double lineIntercept = widget.intercept;
+                            List<FlSpot> rawSpots = _rawCurrentSpots;
+
+                            if (!isMainLine && widget.additionalLines != null) {
+                              for (final config in widget.additionalLines!) {
+                                if (config.color == hit.bar.color) {
+                                  _touchedLineId = config.id;
+                                  lineLabel = config.label;
+                                  lineSlope = config.slope;
+                                  lineIntercept = config.intercept;
+                                  rawSpots = _rawSpotsMap[config.id] ?? [];
+                                  break;
+                                }
+                              }
+                            } else {
+                              _touchedLineId = 'main';
+                            }
+
+                            // 從原始數據中找到最接近的點
                             FlSpot? closestRawSpot;
                             double minDistance = double.infinity;
-                            for (final raw in _rawCurrentSpots) {
+                            for (final raw in rawSpots) {
                               if (raw.x >= _tStartMs && raw.x < _tEndMs) {
                                 final d = (raw.x - hitX).abs();
                                 if (d < minDistance) {
@@ -890,24 +1142,37 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                               }
                             }
 
-                            final target = closestRawSpot ?? FlSpot(hit.x, _glucoseToCurrent(hit.y) / 1E8);
+                            final target = closestRawSpot ?? FlSpot(
+                                hit.x,
+                                _glucoseToCurrent(hit.y, slope: lineSlope, intercept: lineIntercept) / 1E8
+                            );
+
                             final displaySpot = FlSpot(
                               target.x,
-                              _currentToGlucose(target.y),
+                              _currentToGlucose(target.y, slope: lineSlope, intercept: lineIntercept),
                             );
 
                             final dt = DateTime.fromMillisecondsSinceEpoch(displaySpot.x.toInt());
                             final timeStr = _formatTime(dt);
-                            final actualCurrentA = _glucoseToCurrent(displaySpot.y) / 1E8;
+                            final actualCurrentA = _glucoseToCurrent(
+                                displaySpot.y,
+                                slope: lineSlope,
+                                intercept: lineIntercept
+                            ) / 1E8;
                             final currentNanoAmperes = actualCurrentA * 1E9;
 
                             setState(() {
                               _touchedX = displaySpot.x;
                               _touchedY = displaySpot.y;
-                              _tooltipText = '時間: $timeStr\n'
+                              _tooltipText = isMainLine
+                                  ? '時間: $timeStr\n'
                                   '血糖: ${displaySpot.y.toStringAsFixed(2)} mg/dL\n'
                                   '電流: ${currentNanoAmperes.toStringAsFixed(2)} nA\n'
-                                  '(實際採樣值)';
+                                  '(實際採樣值)'
+                                  : '【$lineLabel】\n'
+                                  '時間: $timeStr\n'
+                                  '血糖: ${displaySpot.y.toStringAsFixed(2)} mg/dL\n'
+                                  '電流: ${currentNanoAmperes.toStringAsFixed(2)} nA';
                             });
                           }
                         }
@@ -918,7 +1183,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                           ? [
                         HorizontalLine(
                           y: _touchedY!,
-                          color: Colors.blue.withOpacity(0.8),
+                          color: _getTouchedLineColor().withOpacity(0.8),
                           strokeWidth: 2,
                           dashArray: [5, 5],
                           label: HorizontalLineLabel(show: false),
@@ -929,7 +1194,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                           ? [
                         VerticalLine(
                           x: _touchedX!,
-                          color: Colors.blue.withOpacity(0.8),
+                          color: _getTouchedLineColor().withOpacity(0.8),
                           strokeWidth: 2,
                           dashArray: [5, 5],
                           label: VerticalLineLabel(show: false),
@@ -1046,7 +1311,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                     child: Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: Colors.blueGrey.withOpacity(0.9),
+                        color: _getTouchedLineColor().withOpacity(0.9),
                         borderRadius: BorderRadius.circular(8),
                         boxShadow: [
                           BoxShadow(
@@ -1072,6 +1337,20 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         ),
       ],
     );
+  }
+
+  Color _getTouchedLineColor() {
+    if (_touchedLineId == null || _touchedLineId == 'main') return Colors.blue;
+
+    if (widget.additionalLines != null) {
+      for (final config in widget.additionalLines!) {
+        if (config.id == _touchedLineId) {
+          return config.color;
+        }
+      }
+    }
+
+    return Colors.blue;
   }
 
   String _formatWindowDuration(double durationMs) {
