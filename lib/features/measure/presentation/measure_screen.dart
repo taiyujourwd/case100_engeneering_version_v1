@@ -42,9 +42,18 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
   int smooth2Order = 7;          // Smooth2 的 order（例：Savitzky-Golay 或自定義）
   double smooth2Error = 3.0;     // Smooth2 的允許誤差（自定義語意）
 
-  // ✅ 平滑後樣本（供圖表使用）
-  List<Sample> smooth1Samples = const [];
-  List<Sample> smooth2Samples = const [];
+  // Smooth 3
+  int smooth3TrimN = 20;
+  double smooth3TrimC = 20.0;
+  double smooth3TrimDelta = 0.8;
+  bool smooth3UseTrimmedWindow = true;
+
+  int smooth3KalmanN = 10;
+  double smooth3Kn = 0.2;
+
+  int smooth3WeightN = 10;
+  double smooth3P = 3.0;
+  bool smooth3KeepHeadOriginal = true;
 
   // ✅ 主線程 BLE 訂閱（iOS 必須，Android 備援）
   StreamSubscription<BleDeviceData>? _mainThreadBleSubscription;
@@ -235,6 +244,15 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     final s1Order = prefs.getInt('smooth1_order') ?? 5;
     final s2Order = prefs.getInt('smooth2_order') ?? 7;
     final s2Error = prefs.getDouble('smooth2_error') ?? 3.0;
+    final s3TrimN = prefs.getInt('smooth3_trim_n') ?? 20;
+    final s3TrimC = prefs.getDouble('smooth3_trim_c') ?? 20.0;
+    final s3TrimDelta = prefs.getDouble('smooth3_trim_delta') ?? 0.8;
+    final s3UseTrimmedWindow = prefs.getBool('smooth3_use_trimmed_window') ?? true;
+    final s3KalmanN = prefs.getInt('smooth3_kalman_n') ?? 10;
+    final s3Kn = prefs.getDouble('smooth3_kn') ?? 0.2;
+    final s3WeightN = prefs.getInt('smooth3_weight_n') ?? 10;
+    final s3P = prefs.getDouble('smooth3_p') ?? 3.0;
+    final s3KeepHeadOriginal = prefs.getBool('smooth3_keep_head_original') ?? true;
 
     if (!mounted) return;
     setState(() {
@@ -242,6 +260,15 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
       smooth1Order = s1Order;
       smooth2Order = s2Order;
       smooth2Error = s2Error;
+      smooth3TrimN = s3TrimN;
+      smooth3TrimC = s3TrimC;
+      smooth3TrimDelta = s3TrimDelta;
+      smooth3UseTrimmedWindow = s3UseTrimmedWindow;
+      smooth3KalmanN = s3KalmanN;
+      smooth3Kn = s3Kn;
+      smooth3WeightN = s3WeightN;
+      smooth3P = s3P;
+      smooth3KeepHeadOriginal = s3KeepHeadOriginal;
     });
 
     debugPrint('🧮 載入平滑設定: method=$smoothMethod, '
@@ -1355,6 +1382,44 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     return out;
   }
 
+  List<Sample> buildSmooth3Samples(List<Sample> raw, {
+    required int trimN,
+    required double trimC,
+    required double trimDelta,
+    required bool useTrimmedWindow,
+    required int kalmanN,
+    required double kn,
+    required int weightN,
+    required double p,
+    required bool keepHeadOriginal,
+  }) {
+    if (raw.isEmpty) return const [];
+    final src = [...raw]..sort((a, b) => a.ts.compareTo(b.ts));
+
+    final smoother = DataSmoother();
+    final out = <Sample>[];
+
+    for (final s in src) {
+      final v = s.current!;
+      smoother.addData(v);
+
+      final sm = smoother.smooth3(
+        trimN: trimN,
+        trimC: trimC,
+        trimDelta: trimDelta,
+        useTrimmedWindow: useTrimmedWindow,
+        kalmanN: kalmanN,
+        kn: kn,
+        weightN: weightN,
+        p: p,
+        keepHeadOriginal: keepHeadOriginal,
+      ) ?? v;
+
+      out.add(s.copyWith(current: sm));
+    }
+    return out;
+  }
+
   @override
   Widget build(BuildContext context) {
     // ✅ 監聽版本號
@@ -1559,6 +1624,20 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
                           ? buildSmooth2Samples(list, smooth2Order, smooth2Error)
                           : const <Sample>[];
 
+                      final smooth3Samples = (smoothMethod == 3)
+                          ? buildSmooth3Samples(
+                        list,
+                        trimN: smooth3TrimN,
+                        trimC: smooth3TrimC,
+                        trimDelta: smooth3TrimDelta,
+                        useTrimmedWindow: smooth3UseTrimmedWindow,
+                        kalmanN: smooth3KalmanN,
+                        kn: smooth3Kn,
+                        weightN: smooth3WeightN,
+                        p: smooth3P,
+                        keepHeadOriginal: smooth3KeepHeadOriginal,
+                      ): const <Sample>[];
+
                       print('test123 smooth1Samples: $smooth1Samples');
                       print('test123 smooth2Samples: $smooth2Samples');
 
@@ -1578,6 +1657,15 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
                             label: 'Smooth 2',
                             color: Colors.orange,
                             samples: smooth2Samples,
+                            slope: params.slope,
+                            intercept: params.intercept,
+                          );
+                        } else if (smoothMethod == 3) {
+                          return LineDataConfig(
+                            id: 'smooth3',
+                            label: 'Smooth 3',
+                            color: Colors.purple,
+                            samples: smooth3Samples,
                             slope: params.slope,
                             intercept: params.intercept,
                           );
