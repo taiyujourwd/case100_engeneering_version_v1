@@ -991,11 +991,12 @@ class BleService {
       return (m[hiIndex] << 8) | m[hiIndex + 1];
     }
 
-    final rawCurrent = _safeU16(mfr, 4);
-    if (rawCurrent >= 0) {
-      final current_mA = rawCurrent / 10.0;
-      rawCurrents.add(current_mA);
-    }
+    // final rawCurrent = _safeU16(mfr, 4);
+    // print('test123 rawCurrent: $rawCurrent');
+    // if (rawCurrent >= 0) {
+    //   final current_mA = rawCurrent / 10.0;
+    //   rawCurrents.add(current_mA);
+    // }
 
     final rawTemp = _safeU16(mfr, 6);
     if (rawTemp >= 0) {
@@ -1007,7 +1008,8 @@ class BleService {
       voltage = rawVolt / 1000.0;
     }
 
-    final current = calculateCurrent(rawCurrents);
+    // final current = calculateCurrent(rawCurrents);
+    final current = calculateCurrentFromMfr(mfr, 4);
     final currents = [current];
 
     return BleDeviceData(
@@ -1020,6 +1022,44 @@ class BleService {
       currents: currents,
       rawData: mfr,
     );
+  }
+
+  double calculateCurrentFromMfr(List<int> mfr, int offset) {
+    const double R1 = 2.00E6;
+    const double R2 = 88.7E3;
+    const double R3 = 100.00E3;
+    const double R4 = 2.00E6;
+    const double V_09 = 0.9000;
+    const double TIR_Inp = V_09;
+
+    try {
+      if (offset < 0 || offset + 1 >= mfr.length) {
+        throw Exception("索引超出範圍");
+      }
+
+      // 取第 offset 與 offset+1 個 Byte (Big Endian)
+      final hi = mfr[offset];
+      final lo = mfr[offset + 1];
+
+      // 轉成 u16
+      final u16 = (hi << 8) | lo;
+
+      // 換算成電壓 (mV → V)
+      final V_out = u16 / 1000.0;
+
+      // 電路公式
+      final V_In_N = (V_out - V_09) / (R3 + R4) * R3 + V_09;
+      final V_TIR = V_In_N + (V_In_N / R1) * R2;
+      final result = (V_TIR - TIR_Inp) / 20E6; // 單位 A
+
+      debugPrint("offset=$offset, raw=[${hi.toRadixString(16)} ${lo.toRadixString(16)}], "
+          "u16=$u16, V_out=$V_out, result=$result");
+
+      return result;
+    } catch (e) {
+      debugPrint(">> calculateCurrentFromMfr() error: $e");
+      return -1;
+    }
   }
 
   double calculateCurrent(List<double> currents) {
@@ -1040,6 +1080,7 @@ class BleService {
       double V_TIR = V_In_N + (V_In_N / R1) * R2;
       double result = (V_TIR - TIR_Inp) / 20E6;
 
+      print('test123 result: $result');
       return result;
     } catch (error) {
       debugPrint(">> calculateCurrent() error: $error");

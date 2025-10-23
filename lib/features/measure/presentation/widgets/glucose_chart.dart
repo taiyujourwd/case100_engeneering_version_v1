@@ -549,7 +549,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   double _currentToGlucose(double currentAmperes, {double? slope, double? intercept}) {
     final s = slope ?? widget.slope;
     final i = intercept ?? widget.intercept;
-    return s * (currentAmperes * 1E8) + i;
+    return s * (currentAmperes * 1E9) + i;
   }
 
   double _glucoseToCurrent(double glucose, {double? slope, double? intercept}) {
