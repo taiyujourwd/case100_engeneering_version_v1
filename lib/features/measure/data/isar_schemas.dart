@@ -16,7 +16,7 @@ class Sample {
   double? glucose;      // 血糖值
   double? temperature;  // 新增溫度欄位
 
-  List<double>? currents; // 新增：儲存多個電流值的陣列
+  List<double>? currents; // 儲存多個電流值的陣列
 
   Sample copyWith({
     Id? id,

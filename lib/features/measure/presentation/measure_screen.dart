@@ -22,6 +22,8 @@ import '../models/ble_device.dart';  // ✅ 加入
 import 'providers/ble_providers.dart';
 import 'widgets/glucose_chart.dart';
 
+enum BleUiState { idle, connecting, connected }
+
 class MeasureScreen extends ConsumerStatefulWidget {
   const MeasureScreen({super.key});
 
@@ -30,7 +32,8 @@ class MeasureScreen extends ConsumerStatefulWidget {
 }
 
 // ✅ 加入 WidgetsBindingObserver 監聽生命週期
-class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindingObserver {
+class _MeasureScreenState extends ConsumerState<MeasureScreen>
+    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   late String _dayKey;
   int _navIndex = 0;
   String? _scannedDeviceName;
@@ -58,9 +61,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
   // ✅ 主線程 BLE 訂閱（iOS 必須，Android 備援）
   StreamSubscription<BleDeviceData>? _mainThreadBleSubscription;
 
+  late final AnimationController _spinCtrl;
+
   @override
   void initState() {
     super.initState();
+    _spinCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    )..repeat(); // 需要時再啟/停，預設可先停
+    _spinCtrl.stop();
+
     _dayKey = dayKeyOf(DateTime.now());
 
     // ✅ 集中處理所有異步初始化
@@ -134,7 +145,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
   }
 
   void _handleForegroundData(dynamic data) {
-    print('test123 versionUpdate');
     debugPrint('📬 [UI] 收到原始訊息: $data');
 
     if (!mounted) {
@@ -146,17 +156,12 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
       final type = data['type'];
       debugPrint('📦 [UI] 訊息類型: $type');
 
-      print('test123 version 1');
-
       switch (type) {
         case 'version':
-          print('test123 version 2');
           final version = data['version'] as String?;
           if (version != null && version.isNotEmpty) {
-            print('test123 version 3');
             debugPrint('✅ [UI] 收到版本號: $version');
             if (mounted) {
-              print('test123 version 4');
               ref.read(targetDeviceVersionProvider.notifier).state = version;
               debugPrint('✅ [UI] 版本號已更新到 provider');
             }
@@ -238,8 +243,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     // 讀 smoothing_method，預設 '0' 表不套用
     final method = prefs.getInt('smoothing_method') ?? 0;
 
-    print('test123 method: $method');
-
     // 預設值：避免第一次沒有資料
     final s1Order = prefs.getInt('smooth1_order') ?? 5;
     final s2Order = prefs.getInt('smooth2_order') ?? 7;
@@ -280,7 +283,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
 
     // ✅ 只在 Android 上設置 Foreground Task callback
     if (Platform.isAndroid) {
-      print('test123 _setupDataCallback2');
       FlutterForegroundTask.removeTaskDataCallback(_handleForegroundData);
       FlutterForegroundTask.addTaskDataCallback(_handleForegroundData);
       debugPrint('✅ [Android] data callback 設置完成');
@@ -677,132 +679,123 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     });
   }
 
-  // ✅ 修改：支援 iOS 和 Android 雙模式
+  // ✅ 支援 iOS 和 Android 雙模式
   void _handleBleConnection() async {
     final bleService = ref.read(bleServiceProvider);
     final isConnected = ref.read(bleConnectionStateProvider);
 
     if (isConnected) {
-      // 停止服務
-      _serviceMonitor?.cancel();
+      // ⭐ 進入「正在停止」：先讓 UI 回 idle（也可新增 disconnecting 狀態，這裡簡化）
+      ref.read(bleUiStateProvider.notifier).state = BleUiState.idle;
+      _spinCtrl.stop();
 
-      // ✅ iOS：停止主線程監聽
+      _serviceMonitor?.cancel();
       if (Platform.isIOS) {
         await _mainThreadBleSubscription?.cancel();
         _mainThreadBleSubscription = null;
         await bleService.stopScan();
-        debugPrint('🍎 [iOS] 已停止主線程 BLE 監聽');
       }
 
       final success = await ForegroundBleService.stopSafely();
-
-      // ✅ 釋放 WakeLock
       await WakelockPlus.disable();
-      debugPrint('🔓 已釋放 WakeLock');
 
       if (success) {
         ref.read(bleConnectionStateProvider.notifier).state = false;
         _toast('已停止藍芽監聽');
-        debugPrint('✅ 已停止藍芽監聽');
       } else {
         _toast('停止服務失敗');
       }
-    } else {
-      // 啟動服務
-      // ✅ Android：請求電池優化豁免
-      if (Platform.isAndroid) {
-        await _requestBatteryOptimizationExemption();
-      }
+      return;
+    }
 
-      // ✅ 啟動 WakeLock（保持 CPU 運行）
-      await WakelockPlus.enable();
-      debugPrint('🔒 已啟用 WakeLock');
-      _toast('已啟用防休眠');
+    // ---- 以下為「開始連線」流程 ----
 
-      debugPrint('📋 開始請求藍芽權限...');
-      final hasPermission = await bleService.requestPermissions();
+    // ⭐ UI 先進入 connecting 狀態（顯示動畫）
+    ref.read(bleUiStateProvider.notifier).state = BleUiState.connecting;
+    _spinCtrl.repeat();
 
-      if (!hasPermission) {
-        _toast('藍芽權限不足，請在設定中授予權限');
-        debugPrint('❌ 藍芽權限未全數授予');
-        _showPermissionDialog();
+    if (Platform.isAndroid) {
+      await _requestBatteryOptimizationExemption();
+    }
+    await WakelockPlus.enable();
+
+    final hasPermission = await bleService.requestPermissions();
+    if (!hasPermission) {
+      _toast('藍芽權限不足，請在設定中授予權限');
+      _showPermissionDialog();
+      // ⭐ 權限失敗 → 回 idle
+      ref.read(bleUiStateProvider.notifier).state = BleUiState.idle;
+      _spinCtrl.stop();
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final modeIndex = prefs.getInt('ble_connection_mode') ?? 0;
+    final mode = BleConnectionMode.values[modeIndex];
+
+    String? deviceName = prefs.getString('device_name');
+    String? deviceId = prefs.getString('target_device_id');
+
+    if (deviceName == null || deviceName.isEmpty) {
+      deviceName = await _showDeviceNameDialog();
+      if (deviceName == null) {
+        // ⭐ 使用者取消 → 回 idle
+        ref.read(bleUiStateProvider.notifier).state = BleUiState.idle;
+        _spinCtrl.stop();
         return;
       }
+    }
 
-      debugPrint('✅ 藍芽權限已授予');
-
-      final prefs = await SharedPreferences.getInstance();
-      final modeIndex = prefs.getInt('ble_connection_mode') ?? 0;
-      final mode = BleConnectionMode.values[modeIndex];
-
-      String? deviceName = prefs.getString('device_name');
-      String? deviceId = prefs.getString('target_device_id');
-
-      if (deviceName == null || deviceName.isEmpty) {
-        deviceName = await _showDeviceNameDialog();
-        if (deviceName == null) return;
-      }
-
-      // ✅ iOS：使用主線程模式
-      if (Platform.isIOS) {
-        debugPrint('🍎 [iOS] 啟動主線程 BLE 模式');
-
-        ref.read(targetDeviceNameProvider.notifier).state = deviceName;
-        ref.read(bleConnectionStateProvider.notifier).state = true;
-
-        // 啟動 BLE 掃描或連線
-        if (mode == BleConnectionMode.broadcast) {
-          await bleService.startScan(
-            targetName: deviceName,
-            targetId: deviceId,
-          );
-        } else {
-          await bleService.startConnectionMode(
-            deviceId: deviceId ?? '',
-            deviceName: deviceName,
-          );
-        }
-
-        // 啟動主線程監聽
-        _setupMainThreadBleListener();
-
-        _toast('藍芽服務已啟動（iOS 模式）：$deviceName');
-        debugPrint('✅ [iOS] 藍芽服務已啟動（主線程模式）');
-
-        // ✅ 首次使用時顯示 iOS 限制說明
-        final hasShownWarning = prefs.getBool('ios_warning_shown') ?? false;
-        if (!hasShownWarning) {
-          await prefs.setBool('ios_warning_shown', true);
-          _showIosLimitationDialog();
-        }
-
-        return;
-      }
-
-      // ✅ Android：使用前景服務
-      final modeText = mode == BleConnectionMode.broadcast ? '廣播' : '連線';
-      debugPrint('🤖 [Android] 準備啟動前景服務：模式=$modeText, 設備=$deviceName');
-
-      final success = await ForegroundBleService.start(
-        targetDeviceId: deviceId,
-        targetDeviceName: deviceName,
-        mode: mode,
-      );
-
-      if (success) {
-        ref.read(targetDeviceNameProvider.notifier).state = deviceName;
-        ref.read(bleConnectionStateProvider.notifier).state = true;
-        _toast('藍芽前景服務已啟動（$modeText 模式）：$deviceName');
-        debugPrint('✅ [Android] 藍芽前景服務已啟動');
-        _startServiceMonitoring();
+    if (Platform.isIOS) {
+      ref.read(targetDeviceNameProvider.notifier).state = deviceName;
+      ref.read(bleConnectionStateProvider.notifier).state = true;
+      // iOS 主線程
+      if (mode == BleConnectionMode.broadcast) {
+        await bleService.startScan(targetName: deviceName, targetId: deviceId);
       } else {
-        _toast('前景服務啟動失敗');
-        debugPrint('❌ [Android] 前景服務啟動失敗');
+        await bleService.startConnectionMode(deviceId: deviceId ?? '', deviceName: deviceName);
       }
+      _setupMainThreadBleListener();
+      _toast('藍芽服務已啟動（iOS 模式）：$deviceName');
+
+      // ⭐ 成功 → connected
+      ref.read(bleUiStateProvider.notifier).state = BleUiState.connected;
+      _spinCtrl.stop();
+
+      final hasShownWarning = prefs.getBool('ios_warning_shown') ?? false;
+      if (!hasShownWarning) {
+        await prefs.setBool('ios_warning_shown', true);
+        _showIosLimitationDialog();
+      }
+      return;
+    }
+
+    // Android 前景服務
+    final success = await ForegroundBleService.start(
+      targetDeviceId: deviceId,
+      targetDeviceName: deviceName,
+      mode: mode,
+    );
+
+    if (success) {
+      ref.read(targetDeviceNameProvider.notifier).state = deviceName;
+      ref.read(bleConnectionStateProvider.notifier).state = true;
+      _toast('藍芽前景服務已啟動：$deviceName');
+      _startServiceMonitoring();
+
+      // ⭐ 成功 → connected
+      ref.read(bleUiStateProvider.notifier).state = BleUiState.connected;
+      _spinCtrl.stop();
+    } else {
+      _toast('前景服務啟動失敗');
+
+      // ⭐ 失敗 → 回 idle
+      ref.read(bleUiStateProvider.notifier).state = BleUiState.idle;
+      _spinCtrl.stop();
     }
   }
 
-  // ✅ 新增：iOS 限制說明對話框
+  // ✅ iOS 限制說明對話框
   void _showIosLimitationDialog() {
     showDialog(
       context: context,
@@ -876,6 +869,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
 
   @override
   void dispose() {
+    _spinCtrl.dispose();
+
     // ✅ 移除生命週期觀察者
     WidgetsBinding.instance.removeObserver(this);
 
@@ -1425,6 +1420,9 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
     // ✅ 監聽版本號
     ref.watch(versionListenerProvider);
 
+    // 讀取 UI 狀態
+    final bleUiState = ref.watch(bleUiStateProvider);
+
     final repoAsync = ref.watch(repoProvider);
     final bleConnected = ref.watch(bleConnectionStateProvider);
     final params = ref.watch(correctionParamsProvider);
@@ -1610,7 +1608,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
                         debugPrint('   錯誤: ${snap.error}');
                         debugPrint('   堆棧: ${snap.stackTrace}');
                       }
-                      print('test123 smoothMethod: $smoothMethod');
 
                       final list = snap.data ?? const [];
                       debugPrint('   數據筆數: ${list.length}');
@@ -1637,9 +1634,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
                         p: smooth3P,
                         keepHeadOriginal: smooth3KeepHeadOriginal,
                       ): const <Sample>[];
-
-                      print('test123 smooth1Samples: $smooth1Samples');
-                      print('test123 smooth2Samples: $smooth2Samples');
 
                       LineDataConfig? buildSecondLine() {
                         if (smoothMethod == 1) {
@@ -1720,6 +1714,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
 
                       return // 使用方式
                         GlucoseChart(
+                          dayKey: _dayKey,
                           samples: list,  // 主線使用原始數據
                           slope: params.slope,
                           intercept: params.intercept,
@@ -1860,13 +1855,51 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen> with WidgetsBindi
             unselectedItemColor: Colors.white,
             items: [
               BottomNavigationBarItem(
-                icon: Icon(
-                  bleConnected ? Icons.bluetooth_connected : Icons.bluetooth_disabled,
-                  color: bleConnected ? Colors.green : Colors.white,
-                  size: 20,
+                icon: SizedBox(
+                  width: 24,
+                  height: 24,
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 250),
+                    switchInCurve: Curves.easeOut,
+                    switchOutCurve: Curves.easeIn,
+                    transitionBuilder: (child, anim) =>
+                        ScaleTransition(scale: anim, child: child),
+                    child: () {
+                      switch (bleUiState) {
+                        case BleUiState.idle:
+                          // 未連線：藍牙關閉圖示
+                          return const Icon(
+                            Icons.bluetooth_disabled,
+                            key: ValueKey('idle'),
+                          );
+                        case BleUiState.connecting:
+                          // 連線中：轉圈圈動畫（autorenew + RotationTransition）
+                          return RotationTransition(
+                            key: const ValueKey('connecting'),
+                            turns: _spinCtrl,
+                            child: const Icon(Icons.autorenew),
+                          );
+                        case BleUiState.connected:
+                          // 已連線：停止鍵
+                          return const Icon(
+                            Icons.stop_circle,
+                            key: ValueKey('connected'),
+                          );
+                      }
+                    }(),
+                  ),
                 ),
                 label: '藍芽',
-                tooltip: '藍芽連線/裝置管理',
+                tooltip: () {
+                  switch (bleUiState) {
+                    case BleUiState.idle:
+                      return '點擊開始連線';
+                    case BleUiState.connecting:
+                      return '連線中…';
+                    case BleUiState.connected:
+                      return '已連線，點擊可停止';
+                  }
+                }(),
               ),
               const BottomNavigationBarItem(
                 icon: Icon(Icons.qr_code_scanner, color: Colors.white),

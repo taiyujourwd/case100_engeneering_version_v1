@@ -845,9 +845,135 @@ class BleService {
     }
   }
 
+  // 測試用
+  /// 小端 + 有號 16-bit
+  int int16LE(List<int> b, int off) {
+    final v = (b[off] & 0xFF) | ((b[off + 1] & 0xFF) << 8);
+    return (v & 0x8000) != 0 ? v - 0x10000 : v;
+  }
+
+  /// 小端 + 無號 16-bit（如果你要解析像「計數器」或「長度」）
+  int uint16LE(List<int> b, int off) {
+    return (b[off] & 0xFF) | ((b[off + 1] & 0xFF) << 8);
+  }
+
+  /// 電流 mA：int16LE 後依協議除以 10
+  double? parseCurrent_mA_LE(List<int> b, int off) {
+    if (off + 1 >= b.length) return null;
+    final raw = int16LE(b, off);
+    // 缺值碼（依韌體定義調整；常見是 -1 或 -32768）
+    if (raw == -1 || raw == -32768) return null;
+    return raw / 10.0;
+  }
+
+  /// Dump 輔助，快速定位 offset
+  String hexDump(Iterable<int> bytes, {int width = 16}) {
+    final b = bytes.toList();
+    final buf = StringBuffer();
+    for (int off = 0; off < b.length; off += width) {
+      final chunk = b.skip(off).take(width);
+      final hex = chunk
+          .map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase())
+          .join(' ');
+      buf.writeln(off.toRadixString(16).padLeft(4, '0').toUpperCase() + ': ' + hex);
+    }
+    return buf.toString();
+  }
+
+  // ====== 通用解析工具 ======
+  int _toSigned16(int v) => (v & 0x8000) != 0 ? v - 0x10000 : v;
+
+  int _int16LE(List<int> b, int off) {
+    final v = (b[off] & 0xFF) | ((b[off + 1] & 0xFF) << 8);
+    return _toSigned16(v);
+  }
+
+  int _int16BE(List<int> b, int off) {
+    final v = ((b[off] & 0xFF) << 8) | (b[off + 1] & 0xFF);
+    return _toSigned16(v);
+  }
+
+  String _hex2(int x) => x.toRadixString(16).padLeft(2, '0').toUpperCase();
+
+  /// 把 bytes 以帶索引的十六進位列印（除錯用）
+  String _hexDump(Iterable<int> bytes, {int width = 16}) {
+    final b = bytes.toList();
+    final buf = StringBuffer();
+    for (int off = 0; off < b.length; off += width) {
+      final chunk = b.skip(off).take(width);
+      final hex = chunk.map((x) => _hex2(x)).join(' ');
+      buf.writeln(off.toString().padLeft(3) + ': ' + hex);
+    }
+    return buf.toString();
+  }
+
+  /// 測試用
+  /// 掃描 [start..end) 範圍內所有兩兩位元組，列出：
+  ///  - index, bytes, LE(raw), LE/10(mA), BE(raw), BE/10(mA)
+  /// 可用 min/max 篩掉離譜的值（例如 mA 合理範圍）
+  void debugScanAllInt16Pairs({
+    required List<int> bytes,
+    String tag = 'SCAN',
+    int? start,
+    int? end,
+    double scale = 0.1,        // 依協議，電流通常 /10 → mA
+    bool onlyPlausible = false,
+    double plausibleMin = -5000, // mA
+    double plausibleMax =  5000, // mA
+  }) {
+    final s = start ?? 0;
+    final e = end == null ? (bytes.length - 1) : end.clamp(0, bytes.length - 1);
+
+    debugPrint('[$tag] bytes=${bytes.length}, scan [$s..$e), scale=$scale');
+    for (int i = s; i <= e - 2; i++) {
+      try {
+        final lo = bytes[i] & 0xFF;
+        final hi = bytes[i + 1] & 0xFF;
+
+        final le = _int16LE(bytes, i);
+        final be = _int16BE(bytes, i);
+
+        final leScaled = le * scale; // mA
+        final beScaled = be * scale; // mA
+
+        if (onlyPlausible) {
+          final okLE = leScaled >= plausibleMin && leScaled <= plausibleMax;
+          final okBE = beScaled >= plausibleMin && beScaled <= plausibleMax;
+          if (!okLE && !okBE) continue;
+        }
+
+        debugPrint(
+          '[$tag] off=${i.toString().padLeft(2)} '
+              'bytes=[${_hex2(lo)} ${_hex2(hi)}]  '
+              'LE=${le.toString().padLeft(6)}  LE_mA=${leScaled.toStringAsFixed(1).padLeft(8)}  '
+              'BE=${be.toString().padLeft(6)}  BE_mA=${beScaled.toStringAsFixed(1).padLeft(8)}',
+        );
+      } catch (_) {
+        // ignore 越界
+      }
+    }
+  }
+
   BleDeviceData? _parseManufacturerData(DiscoveredDevice device) {
     final mfr = device.manufacturerData;
     if (mfr.isEmpty) return null;
+
+    // A) 原始廣播（含 Company ID）
+    debugPrint('[ADV:MFD raw]\n${_hexDump(mfr)}');
+
+    // B) 移除前 2 bytes 的 Company ID，掃 payload
+    final payload = (mfr.length >= 2) ? mfr.sublist(2) : mfr;
+    debugPrint('[ADV:payload]\n${_hexDump(payload)}');
+
+    // C) 全面掃描：每個 offset 都算 LE/BE 與 /10(mA)
+    debugScanAllInt16Pairs(
+      bytes: payload,
+      tag: 'ADV',
+      start: 0,
+      end: payload.length, // 可縮小範圍以減少 log
+      scale: 0.1,          // 依協議調整
+      onlyPlausible: false, // 先看全量；噪太多再開 true
+    );
 
     DateTime? timestamp;
     final guess = guessBitfieldTime(mfr);
@@ -950,19 +1076,6 @@ class BleService {
         .where((t) => t.isNotEmpty)
         .map((t) => int.parse(t, radix: 16))
         .toList(growable: false);
-  }
-
-  String hexDump(Iterable<int> bytes, {int width = 16}) {
-    final b = bytes.toList();
-    final buf = StringBuffer();
-    for (int off = 0; off < b.length; off += width) {
-      final chunk = b.skip(off).take(width);
-      final hex = chunk
-          .map((x) => x.toRadixString(16).padLeft(2, '0').toUpperCase())
-          .join(' ');
-      buf.writeln(off.toRadixString(16).padLeft(4, '0').toUpperCase() + ': ' + hex);
-    }
-    return buf.toString();
   }
 
   /// 解析「Undocumented scan throttle ... suggested retry date is ...」的時間

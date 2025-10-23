@@ -7,6 +7,7 @@ import '../../ble/reactive_ble_client.dart';
 import '../../data/measure_repository.dart';
 import '../../ble/ble_service.dart';
 import '../../models/ble_device.dart';
+import '../measure_screen.dart';
 import 'device_info_providers.dart';
 
 // 您原有的 Providers
@@ -26,13 +27,13 @@ final bleServiceProvider = Provider<BleService>((ref) {
 // BLE 連線狀態 Provider
 final bleConnectionStateProvider = StateProvider<bool>((ref) => false);
 
-// ✅ 新增：設備版本號 Stream Provider（如果還沒有）
+// ✅ 設備版本號 Stream Provider（如果還沒有）
 final deviceVersionStreamProvider = StreamProvider<String>((ref) {
   final bleService = ref.watch(bleServiceProvider);
   return bleService.deviceVersionStream;
 });
 
-// ✅ 新增：版本號監聽器
+// ✅ 版本號監聽器
 final versionListenerProvider = Provider<void>((ref) {
   // 監聽版本號 Stream
   ref.listen<AsyncValue<String>>(
@@ -49,4 +50,9 @@ final versionListenerProvider = Provider<void>((ref) {
       });
     },
   );
+});
+
+// UI 專用 Provider
+final bleUiStateProvider = StateProvider<BleUiState>((ref) {
+  return BleUiState.idle;
 });

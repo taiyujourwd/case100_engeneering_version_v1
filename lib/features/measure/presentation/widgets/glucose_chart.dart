@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:math' as math;
+import '../../../../common/utils/date_key.dart';
+import '../providers/ble_providers.dart';
 
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +41,7 @@ class LineDataConfig {
 /// - 點擊曲線顯示該點詳細資訊，並繪製虛線到X/Y軸
 /// - **新增：支援多條曲線繪製**
 class GlucoseChart extends ConsumerStatefulWidget {
+  final String dayKey;
   final List<Sample> samples;
   final double placeholderCurrentA;
   final double slope;
@@ -48,6 +52,7 @@ class GlucoseChart extends ConsumerStatefulWidget {
 
   const GlucoseChart({
     super.key,
+    required this.dayKey,
     required this.samples,
     this.placeholderCurrentA = 0.0,
     this.slope = 600.0,
@@ -99,11 +104,49 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   // 記錄當前繪圖的日期
   DateTime? _currentPlotDate;
 
+  // 「自上一筆」累積秒數
+  Timer? _elapsedTicker;
+  int _elapsedSec = 0;           // 從上一筆開始累積的秒數
+  DateTime? _lastSampleTime;     // 最近一筆資料的時間戳（只用來判斷是否新點）
+
+  void _startElapsedTicker() {
+    _elapsedTicker?.cancel();
+    _elapsedTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        _elapsedSec += 1; // 每秒+1
+      });
+    });
+  }
+
+  void _stopElapsedTicker({bool reset = false}) {
+    _elapsedTicker?.cancel();
+    _elapsedTicker = null;
+    if (reset && mounted) {
+      setState(() {
+        _elapsedSec = 0;
+      });
+    }
+  }
+
+  String _formatElapsed(int sec) {
+    if (sec < 60) return '${sec.toString().padLeft(2, '0')}s';
+    final m = sec ~/ 60;
+    final s = sec % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
+  }
+
   @override
   void initState() {
     super.initState();
     _currentWindowWidthMs = defaultWindowMs;
     _initializeWindow();
+  }
+
+  @override
+  void dispose() {
+    _elapsedTicker?.cancel();
+    super.dispose();
   }
 
   @override
@@ -116,8 +159,6 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         setState(() {});
       }
     }
-
-    print('test123 additionalLines: ${widget.additionalLines}');
 
     // 檢查額外線的參數變化
     if (widget.additionalLines != null) {
@@ -644,7 +685,21 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
   @override
   Widget build(BuildContext context) {
+    ref.listen<bool>(bleConnectionStateProvider, (prev, next) {
+      if (next == true) {
+        if (_lastSampleTime != null && _elapsedTicker == null) {
+          _startElapsedTicker();            // 連上且已有一筆 → 開始每秒累加
+        }
+      } else {
+        _stopElapsedTicker(reset: true);    // 斷線 → 停表 + 歸零
+        _lastSampleTime = null;
+      }
+    });
+
     final glucoseRange = ref.watch(glucoseRangeProvider);
+
+    final todayKey = dayKeyOf(DateTime.now());
+    final isToday = widget.dayKey == todayKey;
 
     // 檢查是否需要重置（基於所有線的最新日期）
     DateTime? latestDateOverall;
@@ -683,6 +738,27 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
     final todaySamples = _filterTodaySamples(widget.samples);
     final hasData = todaySamples.isNotEmpty;
+    final bleConnected = ref.watch(bleConnectionStateProvider); // 讀取藍牙連線狀態（控制要不要計時）
+
+    // ★ 偵測新點：第一次或出現更晚的 ts
+    if (hasData) {
+      final newLast = todaySamples.last.ts;
+      final isNewPoint = _lastSampleTime == null || newLast.isAfter(_lastSampleTime!);
+
+      if (isNewPoint) {
+        _lastSampleTime = newLast;
+        _elapsedSec = 0;            // 歸零
+        if (bleConnected) {
+          _startElapsedTicker();    // 已連線就每秒累加
+        } else {
+          _stopElapsedTicker(reset: false);
+        }
+      }
+    } else {
+      // 沒有任何資料 → 停止與歸零
+      _lastSampleTime = null;
+      _stopElapsedTicker(reset: true);
+    }
 
     if (hasData && _firstDataTime == null) {
       _firstDataTime = todaySamples.first.ts;
@@ -914,6 +990,8 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                       Text('${voltage?.toStringAsFixed(3) ?? '--'} (V)'),
                       Text('電流：$currentDisplay A'),
                       Text('時間：$timestamp'),
+                      if (isToday && bleConnected && _lastSampleTime != null)
+                        Text('距上一筆：${_formatElapsed(_elapsedSec)}'),
                       Text('溫度：${temperature?.toStringAsFixed(2) ?? '--'} ℃'),
                     ],
                   ),
