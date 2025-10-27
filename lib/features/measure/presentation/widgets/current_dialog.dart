@@ -64,7 +64,7 @@ class _CurrentDialogState extends ConsumerState<CurrentDialog> {
   /// - 合併：nA * 1E-9 * 1E8 = nA * 0.1
   /// 最終：glucose = slope * (nA * 0.1) + intercept
   double _currentToGlucose(double currentNanoAmperes, double slope, double intercept) {
-    return slope * (currentNanoAmperes * 0.1) + intercept;
+    return slope * currentNanoAmperes + intercept;
   }
 
   CurrentScaleResult? _createResult() {

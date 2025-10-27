@@ -243,7 +243,14 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
                           Expanded(
                             child: _buildActionButton(
                               'Set Scale by 濃度',
-                              onPressed: _showGlucoseDialog,
+                              onPressed: () async {
+                                final navigator = Navigator.of(context, rootNavigator: true);
+                                // 先關掉 SettingsDialog
+                                navigator.pop();
+                                // 等下一個 frame 再開新對話框，避免用到已 dispose 的 context
+                                await Future.delayed(Duration.zero);
+                                await showGlucoseDialog(navigator.context); // 或傳入你保存的外層 context
+                              },
                             ),
                           ),
                         ],
@@ -254,7 +261,14 @@ class _SettingsDialogState extends ConsumerState<SettingsDialog> {
                           Expanded(
                             child: _buildActionButton(
                               'Set Scale by 電流',
-                              onPressed: _showCurrentDialog,
+                              onPressed: () async {
+                                final navigator = Navigator.of(context, rootNavigator: true);
+                                // 先關掉 SettingsDialog
+                                navigator.pop();
+                                // 等下一個 frame 再開新對話框，避免用到已 dispose 的 context
+                                await Future.delayed(Duration.zero);
+                                await showCurrentDialog(navigator.context); // 或傳入你保存的外層 context
+                              },
                             ),
                           ),
                         ],

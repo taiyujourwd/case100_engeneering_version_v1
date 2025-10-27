@@ -549,7 +549,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   double _currentToGlucose(double currentAmperes, {double? slope, double? intercept}) {
     final s = slope ?? widget.slope;
     final i = intercept ?? widget.intercept;
-    return s * (currentAmperes * 1E9) + i;
+    return s * (currentAmperes * 1e9) + i;
   }
 
   double _glucoseToCurrent(double glucose, {double? slope, double? intercept}) {
@@ -879,12 +879,14 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       }
     }
 
+    final hasUserRange = glucoseRange.min != null && glucoseRange.max != null;
     final gluRange = _calcRange(
-      allYValues.isNotEmpty ? allYValues : [safeMin ?? 0, safeMax ?? 400],
-      fixedMin: safeMin,
-      fixedMax: safeMax,
+      allYValues,
+      fixedMin: hasUserRange ? glucoseRange.min : null,
+      fixedMax: hasUserRange ? glucoseRange.max : null,
       targetTicks: 12,
     );
+
 
     final minX = _tStartMs;
     final maxX = _tEndMs;
@@ -1053,7 +1055,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                       leftTitles: AxisTitles(
                         sideTitles: SideTitles(
                           showTitles: true,
-                          reservedSize: 20,
+                          reservedSize: 30,
                           interval: safeLeftInterval,
                           getTitlesWidget: (v, _) {
                             final text = v.toStringAsFixed(0);
@@ -1069,25 +1071,25 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                       rightTitles: AxisTitles(
                         sideTitles: SideTitles(
                           showTitles: true,
-                          reservedSize: 20,
+                          reservedSize: 30,
                           interval: safeRightInterval,
-                          getTitlesWidget: (glucoseValue, _) {
-                            final currentTimesE8 = _glucoseToCurrent(glucoseValue);
-                            final currentAmperes = currentTimesE8 / 1E8;
-                            final currentNanoAmperes = currentAmperes * 1E9;
+                            getTitlesWidget: (glucoseValue, _) {
+                              // 直接取回「nA」
+                              final currentNa = _glucoseToCurrent(glucoseValue); // nA
 
-                            String text;
-                            if (currentNanoAmperes.abs() < 0.01) {
-                              text = '0.00';
-                            } else {
-                              text = currentNanoAmperes.toStringAsFixed(2);
+                              String text;
+                              if (currentNa.abs() < 0.01) {
+                                text = '0.00';
+                              } else {
+                                text = currentNa.toStringAsFixed(2);
+                              }
+                              return Text(text, style: const TextStyle(fontSize: 8));
                             }
-                            return Text(text, style: const TextStyle(fontSize: 8));
-                          },
+
                         ),
                         axisNameWidget: const Padding(
                           padding: EdgeInsets.only(right: 8, bottom: 4),
-                          child: Text('Current (nA)'),
+                          child: Text('Current (1E - 9)'),
                         ),
                         axisNameSize: 20,
                       ),
@@ -1222,7 +1224,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
                             final target = closestRawSpot ?? FlSpot(
                                 hit.x,
-                                _glucoseToCurrent(hit.y, slope: lineSlope, intercept: lineIntercept) / 1E8
+                                _glucoseToCurrent(hit.y, slope: lineSlope, intercept: lineIntercept) * 1e-9 // nA -> A
                             );
 
                             final displaySpot = FlSpot(
@@ -1232,12 +1234,9 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
                             final dt = DateTime.fromMillisecondsSinceEpoch(displaySpot.x.toInt());
                             final timeStr = _formatTime(dt);
-                            final actualCurrentA = _glucoseToCurrent(
-                                displaySpot.y,
-                                slope: lineSlope,
-                                intercept: lineIntercept
-                            ) / 1E8;
-                            final currentNanoAmperes = actualCurrentA * 1E9;
+                            final currentNa = _glucoseToCurrent(displaySpot.y, slope: lineSlope, intercept: lineIntercept); // nA
+                            final currentNanoAmperes = currentNa;         // 直接用 nA 顯示就好
+
 
                             setState(() {
                               _touchedX = displaySpot.x;
@@ -1492,50 +1491,80 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         double? fixedMax,
         int targetTicks = 12,
       }) {
+    // 1) 若使用者有指定上下限（任一個），就以使用者值為主，另一邊用資料推得（或合理預設），
+    //    並且「不做」padding / nice 刻度，避免 3000 變 520。
+    if (fixedMin != null || fixedMax != null) {
+      // 用資料或預設補齊另一邊
+      final dataMin = values.isEmpty ? 0.0 : values.reduce(math.min);
+      final dataMax = values.isEmpty ? 400.0 : values.reduce(math.max);
+
+      double minV = fixedMin ?? dataMin;
+      double maxV = fixedMax ?? dataMax;
+
+      // 若 min/max 反了或相等，做最小幅度的保護
+      if (!minV.isFinite || !maxV.isFinite) {
+        minV = 0.0; maxV = 400.0;
+      }
+      if (minV >= maxV) {
+        // 只要避免相等或反序即可，給一個很小的跨度
+        const eps = 1e-6;
+        if (minV == maxV) {
+          maxV = minV + 1.0; // 或者給你想要的最小刻度
+        } else {
+          // min > max，交換
+          final t = minV; minV = maxV; maxV = t;
+          if ((maxV - minV) < eps) maxV = minV + 1.0;
+        }
+      }
+
+      return _Range(minV, maxV);
+    }
+
+    // 2) 沒有固定範圍 → 走自動模式（跟你原本邏輯類似）
     double minV, maxV;
 
-    if (fixedMin != null && fixedMax != null) {
-      minV = fixedMin;
-      maxV = fixedMax;
-    } else if (values.isEmpty) {
-      minV = 0;
-      maxV = 400;
+    if (values.isEmpty) {
+      minV = 0.0;
+      maxV = 400.0;
     } else {
       final rawMin = values.reduce(math.min);
       final rawMax = values.reduce(math.max);
 
       final span = (rawMax - rawMin).abs();
+      // 給 15% padding（你原本的做法）
       final pad = span * 0.15 + 1e-12;
       minV = rawMin - pad;
       maxV = rawMax + pad;
 
+      // 當所有值幾乎一樣時，給對稱的最小範圍
       if (span < 1e-10) {
-        final center = (minV + maxV) / 2;
+        final center = (minV + maxV) / 2.0;
         final absCenter = center.abs();
         if (absCenter < 1e-10) {
-          minV = 0;
-          maxV = 400;
+          minV = 0.0;
+          maxV = 400.0;
         } else {
           minV = center - absCenter * 0.5;
           maxV = center + absCenter * 0.5;
         }
       }
 
+      // nice 刻度（自動模式下才做）
       final interval = _niceInterval(minV, maxV, targetTicks);
-
       if (interval > 0 && interval.isFinite) {
         minV = (minV / interval).floor() * interval;
         maxV = (maxV / interval).ceil() * interval;
       }
     }
 
+    // 最終保護
     if (!minV.isFinite || !maxV.isFinite || minV >= maxV) {
-      minV = 0;
-      maxV = 400;
+      minV = 0.0; maxV = 400.0;
     }
 
     return _Range(minV, maxV);
   }
+
 
   double _niceInterval(double min, double max, int targetTicks) {
     final span = (max - min).abs();

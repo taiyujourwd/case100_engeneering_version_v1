@@ -845,6 +845,36 @@ class BleService {
     }
   }
 
+  /// 在指定條件下掃描並回傳「第一個命中」的裝置；超時回 null
+  Future<DiscoveredDevice?> scanFirstHit({
+    String? targetName,
+    String? targetId,
+    List<Uuid>? serviceUuids,
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    DiscoveredDevice? hit;
+    final sub = _ble.scanForDevices(
+      withServices: serviceUuids ?? const [],
+      scanMode: ScanMode.lowLatency,
+      requireLocationServicesEnabled: false,
+    ).listen((d) {
+      final nameOk = (targetName == null || targetName.isEmpty)
+          ? true
+          : d.name.toLowerCase().contains(targetName.toLowerCase());
+      final idOk = (targetId == null || targetId.isEmpty) ? true : d.id == targetId;
+      if (nameOk && idOk && hit == null) {
+        hit = d;
+      }
+    });
+
+    final end = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(end) && hit == null) {
+      await Future.delayed(const Duration(milliseconds: 60));
+    }
+    await sub.cancel();
+    return hit;
+  }
+
   // 測試用
   /// 小端 + 有號 16-bit
   int int16LE(List<int> b, int off) {

@@ -99,16 +99,31 @@ class BleTaskHandler extends TaskHandler {
 
   // 啟動連線模式
   Future<void> _startConnectionMode() async {
+    print('test123 _startConnectionMode');
     try {
-      if (_targetDeviceId != null && _targetDeviceId!.isNotEmpty) {
-        debugPrint('🔗 連線模式：直接連線到 $_targetDeviceId');
-        await _bleService!.startConnectionMode(
-          deviceId: _targetDeviceId!,
-          deviceName: _targetDeviceName,
+      if (_targetDeviceId == null || _targetDeviceId!.isEmpty) {
+        final d = await _bleService!.scanFirstHit(
+          targetName: _targetDeviceName,
+          serviceUuids: /* 你保存的硬體過濾 */ null,
+          timeout: const Duration(seconds: 10),
         );
-      } else {
-        debugPrint('⚠️ 連線模式：缺少設備 ID');
+        if (d != null) {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('target_device_id', d.id);
+          _targetDeviceId = d.id;
+          _targetDeviceName ??= d.name;
+        } else {
+          debugPrint('⚠️ 找不到目標裝置，放棄連線模式啟動');
+          return;
+        }
       }
+
+      print('test123 _targetDeviceId: $_targetDeviceId');
+
+      await _bleService!.startConnectionMode(
+        deviceId: _targetDeviceId!,
+        deviceName: _targetDeviceName,
+      );
     } catch (e) {
       debugPrint('❌ 連線模式啟動失敗: $e');
     }
