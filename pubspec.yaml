@@ -50,6 +50,10 @@ dependencies:
   cupertino_icons: ^1.0.8
   location: ^5.0.3
 
+  csv: ^6.0.0
+
+  syncfusion_flutter_charts: ^31.2.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -68,6 +72,8 @@ dev_dependencies:
 
 # The following section is specific to Flutter packages.
 flutter:
+  assets:
+    - assets/test_data/fake_data.csv
 
   # The following line ensures that the Material Icons font is
   # included with your application, so that you can use the icons in

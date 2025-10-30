@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 class BleDeviceData {
   final String id; //device ID
   final String name; //設備名稱
@@ -40,4 +42,48 @@ class BleDeviceData {
       rawData: rawData ?? this.rawData,
     );
   }
+
+  @override
+  String toString() {
+    return 'BleDeviceData('
+        'id: $id, '
+        'name: $name, '
+        'rssi: $rssi, '
+        'timestamp: $timestamp, '
+        'voltage: $voltage, '
+        'temperature: $temperature, '
+        'currents: $currents, '
+        'rawData: $rawData'
+        ')';
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'rssi': rssi,
+      'timestamp': timestamp?.toIso8601String(),
+      'voltage': voltage,
+      'temperature': temperature,
+      'currents': currents,
+      'rawData': rawData,
+    };
+  }
+}
+
+extension BleDeviceDataJson on BleDeviceData {
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'name': name,
+      'rssi': rssi,
+      'timestamp': timestamp?.toIso8601String(),
+      'voltage': voltage,
+      'temperature': temperature,
+      'currents': currents,
+      'rawData': rawData,
+    };
+  }
+
+  String toJsonString() => jsonEncode(toJson());
 }

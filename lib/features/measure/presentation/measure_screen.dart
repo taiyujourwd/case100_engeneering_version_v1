@@ -1338,7 +1338,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
     }
   }
 
-  // ---- helpers: 用 DataSmoother 生成平滑樣本 ----
+  // ---- 用 DataSmoother 生成平滑樣本 ----
 
   List<Sample> buildSmooth1Samples(List<Sample> raw, int order) {
     if (raw.isEmpty) return const [];
@@ -1372,7 +1372,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
       smoother.addData(v!);
 
       final sm = smoother.smooth2(order, errorPercent) ?? v;
-      out.add(s.copyWith(current: sm));         // ← 若沒有 copyWith，請改用你的建構子
+      out.add(s.copyWith(current: sm));
     }
     return out;
   }
@@ -1712,8 +1712,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
                         );
                       }
 
-                      return // 使用方式
-                        GlucoseChart(
+                      return GlucoseChart(
                           dayKey: _dayKey,
                           samples: list,  // 主線使用原始數據
                           slope: params.slope,

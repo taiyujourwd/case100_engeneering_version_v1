@@ -29,17 +29,35 @@ class LineDataConfig {
     this.intercept = 0.0,
     this.showDots = true,
   });
+
+  @override
+  String toString() {
+    return 'LineDataConfig('
+        'id: $id, '
+        'label: $label, '
+        'color: ${color.value.toRadixString(16)}, '
+        'samples: ${samples.length}, '
+        'slope: $slope, '
+        'intercept: $intercept, '
+        'showDots: $showDots'
+        ')';
+  }
 }
 
 /// 雙 Y 軸曲線圖：左軸=血糖(mg/dL)、右軸=電流(nA)
-/// - 換算關係:血糖(mg/dL) = slope × 電流(A) × 1E8 + intercept
-/// - Y軸範圍由 Riverpod Provider 控制（固定）
-/// - X軸支援雙指縮放：6分鐘 ~ 24小時
+/// - 換算關係:血糖(mg/dL) = slope × 電流(A) × 1E9 + intercept
+/// - Y軸範圍由 Riverpod Provider 控制（固定或自動）
+/// - X軸支援雙指縮放：6分鐘 ~ 36小時
+/// - 初始顯示：6分鐘視窗
+/// - 縮放至最小：6分鐘窗口
+/// - 縮放至最大：6格，每格6小時（36小時）
 /// - 使用接收到的時間和電流直接繪製曲線
 /// - 同一天延續繪製，不同天清空重新開始
 /// - 支持手勢縮放和滑動查看歷史
+/// - 放大後可左右滑動查看被隱藏的部分
 /// - 點擊曲線顯示該點詳細資訊，並繪製虛線到X/Y軸
-/// - **新增：支援多條曲線繪製**
+/// - **支援多條曲線繪製 + 單指平移 + 雙指 X/Y 同步縮放 + 雙擊復位**
+/// - **修正：雙指分離=由時到分(放大)，接近=由分到時(縮小)，X/Y 軸等比例同步**
 class GlucoseChart extends ConsumerStatefulWidget {
   final String dayKey;
   final List<Sample> samples;
@@ -65,10 +83,10 @@ class GlucoseChart extends ConsumerStatefulWidget {
 }
 
 class _GlucoseChartState extends ConsumerState<GlucoseChart> {
-  // ✅ 縮放範圍：6分鐘 到 24小時
-  static const double minWindowMs = 6 * 60 * 1000.0;
-  static const double maxWindowMs = 24 * 60 * 60 * 1000.0;
-  static const double defaultWindowMs = 6 * 60 * 1000.0;
+  // ✅ 縮放範圍：6分鐘 到 36小時
+  static const double minWindowMs = 6 * 60 * 1000.0;  // 最小 6 分鐘
+  static const double maxWindowMs = 36 * 60 * 60 * 1000.0;  // 最大 36 小時（6格×6小時）
+  static const double defaultWindowMs = 6 * 60 * 1000.0;  // 預設 6 分鐘
   static const double oneMinuteMs = 60 * 1000.0;
 
   late double _tStartMs;
@@ -77,6 +95,13 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   DateTime? _firstDataTime;
 
   bool _isManualMode = false;
+
+  // === 針對縮放手勢的 Y 範圍會話狀態 ===
+  bool _yScaleSessionActive = false;
+  double? _yScaleStartMin;   // 雙指縮放「開始」的自動 Y 最小
+  double? _yScaleStartMax;   // 雙指縮放「開始」的自動 Y 最大
+  double  _scaleStartDistance = 0;          // 你原本就有；保留
+  double  _windowWidthBeforeScale = defaultWindowMs; // 你原本就有；保留
 
   // ✅ 手動追蹤觸摸點
   final Map<int, Offset> _pointers = {};  // pointer ID -> 位置
@@ -87,12 +112,8 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   double _dragStartX = 0;
   double? _lastDragX;
 
-  // 縮放相關
-  double _scaleStartDistance = 0;
-  double _windowWidthBeforeScale = defaultWindowMs;
-
   // 觸摸點狀態
-  String? _touchedLineId;  // 新增：記錄被觸摸的線ID
+  String? _touchedLineId;  // 記錄被觸摸的線ID
   double? _touchedY;
   double? _touchedX;
   String? _tooltipText;
@@ -101,13 +122,48 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   List<FlSpot> _rawCurrentSpots = [];
   final Map<String, List<FlSpot>> _rawSpotsMap = {};
 
+  // === 新增：快取（整天） ===
+  List<FlSpot> _cachedMainGlucose = [];
+  final Map<String, List<FlSpot>> _cachedAddGlucose = {};
+  int _cachedMainCount = 0;
+  final Map<String, int> _cachedAddCount = {};
+
+  // === 新增：Y 軸手動模式（同步縮放） ===
+  bool _yManual = false;
+  double? _yMinManual;
+  double? _yMaxManual;
+
+  // 縮放速度（越小越靈敏；1.0=線性；>1.0 越鈍）
+  double _zoomFactor = 0.02;
+  bool _scaleActive = false;   // 超過門檻後才開始縮放
+  double _scaleLastDistance = 0;
+  int _lastScaleTickMs = 0;
+
+// 可調參數
+  double _zoomFactorBase = 0.001;  // 基礎靈敏度（慢速）
+  double _zoomFactorMax  = 0.05;   // 最高靈敏度（快速拖動）
+  double _activateThreshold = 0.5; // 啟動門檻：相對起始距離 ±0.5% 以內不縮放
+
   // 記錄當前繪圖的日期
   DateTime? _currentPlotDate;
 
   // 「自上一筆」累積秒數
   Timer? _elapsedTicker;
   int _elapsedSec = 0;           // 從上一筆開始累積的秒數
-  DateTime? _lastSampleTime;     // 最近一筆資料的時間戳（只用來判斷是否新點）
+  DateTime? _lastSampleTime;     // 最近一筆資料時間戳（判斷新點）
+
+  _Range _autoRangeForCurrentWindow() {
+    final List<double> y = [];
+    y.addAll(_inWindow(_cachedMainGlucose).map((e) => e.y));
+    if (widget.additionalLines != null) {
+      for (final entry in widget.additionalLines!) {
+        final cached = _cachedAddGlucose[entry.id] ?? const <FlSpot>[];
+        y.addAll(_inWindow(cached).map((e) => e.y));
+      }
+    }
+    if (y.isEmpty) return const _Range(0, 400);
+    return _calcRange(y, targetTicks: 12);
+  }
 
   void _startElapsedTicker() {
     _elapsedTicker?.cancel();
@@ -156,7 +212,10 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     if (oldWidget.slope != widget.slope ||
         oldWidget.intercept != widget.intercept) {
       if (mounted) {
-        setState(() {});
+        setState(() {
+          // 主線 slope/intercept 改變時，強制重建快取
+          _cachedMainCount = -1;
+        });
       }
     }
 
@@ -169,14 +228,17 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
           final oldConfig = oldWidget.additionalLines![i];
           final newConfig = widget.additionalLines![i];
           if (oldConfig.slope != newConfig.slope ||
-              oldConfig.intercept != newConfig.intercept) {
+              oldConfig.intercept != newConfig.intercept ||
+              oldConfig.samples.length != newConfig.samples.length) {
             hasChanged = true;
             break;
           }
         }
       }
       if (hasChanged && mounted) {
-        setState(() {});
+        setState(() {
+          _cachedAddCount.clear();
+        });
       }
     }
   }
@@ -204,18 +266,20 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
     if (earliestTime != null) {
       _firstDataTime = earliestTime;
+      // 從數據當天的 00:00 開始
       startTime = DateTime(
         earliestTime.year,
         earliestTime.month,
         earliestTime.day,
-        earliestTime.hour,
-        earliestTime.minute,
+        0,  // 從 00:00 開始
+        0,
         0,
         0,
       );
     } else {
+      // 沒有數據時，從今天 00:00 開始
       final now = DateTime.now();
-      startTime = DateTime(now.year, now.month, now.day, now.hour, now.minute, 0, 0);
+      startTime = DateTime(now.year, now.month, now.day, 0, 0, 0, 0);
     }
 
     _tStartMs = startTime.millisecondsSinceEpoch.toDouble();
@@ -224,6 +288,10 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
   void _advanceWindowIfNeeded(double latestX) {
     if (_isManualMode) return;
+
+    // 如果是接近最大全景視圖，不自動滾動
+    if (_currentWindowWidthMs >= maxWindowMs * 0.95) return;
+
     if (latestX < _tEndMs) return;
 
     final steps = ((latestX - _tEndMs) / oneMinuteMs).floor() + 1;
@@ -260,6 +328,10 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       if (latestX != null) {
         _advanceWindowIfNeeded(latestX);
       }
+
+      // Y 回自動
+      _yManual = false;
+      _yMinManual = _yMaxManual = null;
     });
   }
 
@@ -331,157 +403,324 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     });
   }
 
-  // ✅ 縮放處理
-  void _handleScale(double currentDistance) {
-    if (_scaleStartDistance == 0) return;
-
+  // ✅ 雙指縮放（X + Y）- 修正版本：分離放大，接近縮小
+  void _applyIncrementalScale(double scale) {
     setState(() {
       _isManualMode = true;
 
-      // 計算縮放比例
-      final scale = _scaleStartDistance / currentDistance;
+      // === X 軸（時間窗）- 修正：scale > 1 放大（窗口變小），scale < 1 縮小（窗口變大）===
+      final newWinX = (_currentWindowWidthMs / scale).clamp(minWindowMs, maxWindowMs);
+      final cx = (_tStartMs + _tEndMs) / 2;
+      _tStartMs = cx - newWinX / 2;
+      _tEndMs   = cx + newWinX / 2;
+      _currentWindowWidthMs = newWinX;
 
-      // 計算新的視窗寬度
-      final newWindowWidth = (_windowWidthBeforeScale * scale).clamp(
-        minWindowMs,
-        maxWindowMs,
-      );
+      // === Y 軸（血糖窗）等比例 ===
+      // 若還沒建立會話基準，立即以「當前顯示範圍」建立一次，確保 X、Y 同步
+      if (!_yScaleSessionActive || _yScaleStartMin == null || _yScaleStartMax == null) {
+        final (yMin0, yMax0) = _computeCurrentYRangeForZoom();
+        _yScaleSessionActive = true;
+        _yScaleStartMin = yMin0;
+        _yScaleStartMax = yMax0;
+      }
 
-      // 保持視窗中心點不變
-      final center = (_tStartMs + _tEndMs) / 2;
-      _tStartMs = center - newWindowWidth / 2;
-      _tEndMs = center + newWindowWidth / 2;
+      final span0   = (_yScaleStartMax! - _yScaleStartMin!).abs().clamp(1e-6, 1e9);
+      final center0 = (_yScaleStartMax! + _yScaleStartMin!) / 2.0;
+      // ✅ 修正：scale > 1 放大（span 變小），scale < 1 縮小（span 變大）
+      final spanNew = (span0 / scale).clamp(1.0, 10000.0);
+      _yMinManual = center0 - spanNew / 2.0;
+      _yMaxManual = center0 + spanNew / 2.0;
+      _yManual    = true; // ← 一旦縮放，鎖定為手動比例，避免自動回彈
 
-      // 更新當前視窗寬度
-      _currentWindowWidthMs = newWindowWidth;
-
-      // 對齊到分鐘
+      // === X 起點對齊整分鐘（避免抖動） ===
       final startTime = DateTime.fromMillisecondsSinceEpoch(_tStartMs.toInt());
       final alignedStart = DateTime(
         startTime.year, startTime.month, startTime.day,
         startTime.hour, startTime.minute, 0, 0,
       );
       _tStartMs = alignedStart.millisecondsSinceEpoch.toDouble();
-      _tEndMs = _tStartMs + newWindowWidth;
+      _tEndMs   = _tStartMs + newWinX;
     });
   }
 
-  // ✅ 處理觸摸開始
+  // ✅ 觸控：開始
   void _onPointerDown(PointerDownEvent event) {
+    // 先記錄此指頭的位置，之後再讀 positions
     _pointers[event.pointer] = event.localPosition;
 
-    debugPrint('👇 手指按下: ${_pointers.length} 個手指');
-
     if (_pointers.length == 1) {
-      // ✅ 單指：準備拖動
+      // 單指：準備拖動
       final pos = _pointers.values.first;
       _dragStartX = pos.dx;
       _lastDragX = pos.dx;
       _isDragging = false;
       _isScaling = false;
 
-    } else if (_pointers.length == 2) {
-      // ✅ 雙指：開始縮放
+      // 清縮放狀態
+      _scaleActive = false;
+      _scaleLastDistance = 0;
+      _lastScaleTickMs = 0;
+      return;
+    }
+
+    if (_pointers.length == 2) {
+      // 兩指：準備縮放
+      final positions = _pointers.values.toList();
+      final dx = positions[0].dx - positions[1].dx;
+      final dy = positions[0].dy - positions[1].dy;
+      _scaleStartDistance = math.sqrt(dx * dx + dy * dy);
+      _windowWidthBeforeScale = _currentWindowWidthMs;
+
+      // 以「當前顯示」的 Y 範圍當作縮放基準（無論自動或手動都正確）
+      final (yMin, yMax) = _computeCurrentYRangeForZoom();
+      _yScaleSessionActive = true;
+      _yScaleStartMin = yMin;
+      _yScaleStartMax = yMax;
+
+      // 延後啟動門檻
+      _scaleActive = false;
+      _scaleLastDistance = _scaleStartDistance;
+      _lastScaleTickMs = DateTime.now().millisecondsSinceEpoch;
+
       setState(() {
         _isScaling = true;
         _isDragging = false;
 
-        // 清除 tooltip
+        // 清掉點選提示
         _touchedY = null;
         _touchedX = null;
         _tooltipText = null;
         _touchedLineId = null;
-
-        // 計算初始距離
-        final positions = _pointers.values.toList();
-        final dx = positions[0].dx - positions[1].dx;
-        final dy = positions[0].dy - positions[1].dy;
-        _scaleStartDistance = math.sqrt(dx * dx + dy * dy);
-        _windowWidthBeforeScale = _currentWindowWidthMs;
       });
-
-      debugPrint('🔍 開始縮放: 初始距離 = ${_scaleStartDistance.toStringAsFixed(1)}');
     }
   }
 
-  // ✅ 處理觸摸移動
+  // ✅ 觸控：移動 - 修正版本
   void _onPointerMove(PointerMoveEvent event) {
+    // 先更新目前指頭位置（這行是關鍵！）
     _pointers[event.pointer] = event.localPosition;
 
-    if (_pointers.length == 2 && _isScaling) {
-      // ✅ 雙指縮放
-      final positions = _pointers.values.toList();
-      final dx = positions[0].dx - positions[1].dx;
-      final dy = positions[0].dy - positions[1].dy;
-      final currentDistance = math.sqrt(dx * dx + dy * dy);
-
-      _handleScale(currentDistance);
-
-    } else if (_pointers.length == 1 && !_isScaling) {
-      // ✅ 單指拖動
-      final currentX = event.localPosition.dx;
-      final dragDistance = (currentX - _dragStartX).abs();
-
-      // 移動距離夠遠才開始拖動
-      if (!_isDragging && dragDistance > 10) {
-        setState(() {
+    // 1) 一指 → 水平拖動
+    if (_pointers.length == 1) {
+      final pos = _pointers.values.first;
+      final dx = pos.dx;
+      if (_lastDragX != null) {
+        final delta = dx - _lastDragX!;
+        if (delta.abs() > 0) {
           _isDragging = true;
-        });
-        debugPrint('👆 開始拖動');
+          _isScaling = false;
+          _handleHorizontalDrag(delta);
+        }
       }
-
-      // 執行拖動
-      if (_isDragging && _lastDragX != null) {
-        final delta = currentX - _lastDragX!;
-        _handleHorizontalDrag(delta);
-        _lastDragX = currentX;
-      }
+      _lastDragX = dx;
+      return;
     }
+
+    // 2) 少於兩指，不做縮放
+    if (_pointers.length < 2) return;
+
+    // 3) 兩指 → 縮放（增量 + 速度因子）
+    final positions = _pointers.values.toList();
+    final dx = positions[0].dx - positions[1].dx;
+    final dy = positions[0].dy - positions[1].dy;
+    final currentDistance = math.sqrt(dx * dx + dy * dy);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    // 尚未啟動：檢查門檻
+    if (!_scaleActive) {
+      final denom = (_scaleStartDistance == 0 ? currentDistance : _scaleStartDistance);
+      final ratioFromStart = currentDistance / (denom == 0 ? 1.0 : denom);
+      if ((ratioFromStart - 1.0).abs() < _activateThreshold) {
+        return; // 還沒過門檻
+      }
+      // 一旦過門檻 → 重設基準，避免第一下跳很大
+      _scaleActive = true;
+      _scaleLastDistance = currentDistance;
+      _lastScaleTickMs = nowMs;
+      return;
+    }
+
+    // 已啟動：用上一幀做『增量』
+    final prev = (_scaleLastDistance <= 0) ? currentDistance : _scaleLastDistance;
+    // ✅ 修正：current / prev
+    //    手指分離 (current > prev) → rawStep > 1 → scale > 1 → 放大
+    //    手指接近 (current < prev) → rawStep < 1 → scale < 1 → 縮小
+    double rawStep = (currentDistance <= 0 ? 0.0001 : currentDistance) / prev;
+    final stepDelta = rawStep - 1.0;
+
+    final dtSec = math.max(0.001, (nowMs - _lastScaleTickMs) / 1000.0);
+    final distChangeRatioPerSec = (currentDistance - prev).abs() / math.max(1.0, prev) / dtSec;
+
+    final dynamicFactor = (_zoomFactorBase +
+        (_zoomFactorMax - _zoomFactorBase) * (distChangeRatioPerSec / 2.0))
+        .clamp(_zoomFactorBase, _zoomFactorMax);
+
+    double scale = 1.0 + stepDelta * dynamicFactor;
+
+    const double kStepMin = 0.85; // 一步最多縮 15%
+    const double kStepMax = 1.20; // 一步最多放 20%
+    if (scale.isNaN || !scale.isFinite) scale = 1.0;
+    scale = scale.clamp(kStepMin, kStepMax);
+
+    _applyIncrementalScale(scale);
+
+    _scaleLastDistance = currentDistance;
+    _lastScaleTickMs = nowMs;
   }
 
-  // ✅ 處理觸摸結束
+  // ✅ 觸控：結束
   void _onPointerUp(PointerUpEvent event) {
     _pointers.remove(event.pointer);
 
-    debugPrint('👆 手指抬起: 剩餘 ${_pointers.length} 個手指');
-
     if (_pointers.isEmpty) {
-      // ✅ 所有手指都抬起
-      debugPrint('✋ 手勢結束: isDragging=$_isDragging, isScaling=$_isScaling');
-
       if (_isDragging || _isScaling) {
         _alignWindowToMinute();
       }
-
       setState(() {
         _isDragging = false;
         _isScaling = false;
         _lastDragX = null;
-        _scaleStartDistance = 0;
-      });
 
+        _scaleStartDistance = 0;
+        _scaleActive = false;
+        _scaleLastDistance = 0;
+        _lastScaleTickMs = 0;
+
+        _yScaleSessionActive = false;
+        _yScaleStartMin = null;
+        _yScaleStartMax = null;
+      });
     } else if (_pointers.length == 1 && _isScaling) {
-      // ✅ 從雙指變成單指：取消縮放
       setState(() {
         _isScaling = false;
         _isDragging = false;
+
+        // 縮放結束但仍保留手動 Y 比例
+        _scaleActive = false;
+        _scaleLastDistance = 0;
+        _lastScaleTickMs = 0;
       });
-      debugPrint('⚠️ 縮放中斷，剩一根手指');
     }
   }
 
-  // ✅ 處理觸摸取消
+  // ✅ 觸控：取消
   void _onPointerCancel(PointerCancelEvent event) {
     _pointers.remove(event.pointer);
-
     if (_pointers.isEmpty) {
       setState(() {
         _isDragging = false;
         _isScaling = false;
         _lastDragX = null;
+
         _scaleStartDistance = 0;
+        _scaleActive = false;
+        _scaleLastDistance = 0;
+        _lastScaleTickMs = 0;
+
+        _yScaleSessionActive = false;
+        _yScaleStartMin = null;
+        _yScaleStartMax = null;
       });
     }
+  }
+
+  // === 新增：只在筆數變化時重建快取 ===
+  void _rebuildCachedSpotsIfNeeded() {
+    // 主線
+    final todayMain = _filterTodaySamples(widget.samples);
+    if (todayMain.length != _cachedMainCount) {
+      _cachedMainCount = todayMain.length;
+      _rawCurrentSpots = _mapToSortedSpots(todayMain, (s) => _getCurrent(s));
+
+      // ✅ 去重：移除相同時間戳的重複點（保留最後一個）
+      _rawCurrentSpots = _removeDuplicateTimestamps(_rawCurrentSpots);
+
+      _cachedMainGlucose = _rawCurrentSpots
+          .map((p) => FlSpot(p.x, _currentToGlucose(p.y))) // 主線用 widget.slope/intercept
+          .toList();
+    }
+
+    // 額外線
+    if (widget.additionalLines != null) {
+      for (final config in widget.additionalLines!) {
+        final today = _filterTodaySamples(config.samples);
+        final key = config.id;
+        final prev = _cachedAddCount[key] ?? -1;
+        if (today.length != prev) {
+          _cachedAddCount[key] = today.length;
+
+          final spots = today.isNotEmpty
+              ? _mapToSortedSpots(today, (s) => _getCurrent(s))
+              : <FlSpot>[];
+
+          // ✅ 去重：移除相同時間戳的重複點（保留最後一個）
+          final dedupedSpots = _removeDuplicateTimestamps(spots);
+          _rawSpotsMap[key] = dedupedSpots;
+
+          _cachedAddGlucose[key] = dedupedSpots
+              .map((p) => FlSpot(
+            p.x,
+            _currentToGlucose(
+              p.y,
+              slope: config.slope,
+              intercept: config.intercept,
+            ),
+          ))
+              .toList();
+        }
+      }
+    }
+  }
+
+  // ✅ 新增：移除相同時間戳的重複數據點
+  List<FlSpot> _removeDuplicateTimestamps(List<FlSpot> spots) {
+    if (spots.isEmpty) return spots;
+
+    final Map<double, FlSpot> uniqueSpots = {};
+    for (final spot in spots) {
+      // 如果時間戳已存在，用新的點覆蓋（保留最後一個）
+      uniqueSpots[spot.x] = spot;
+    }
+
+    // 轉回列表並排序
+    final result = uniqueSpots.values.toList()
+      ..sort((a, b) => a.x.compareTo(b.x));
+
+    return result;
+  }
+
+  // 視窗裁切（不改變快取內容）
+  List<FlSpot> _inWindow(List<FlSpot> all) {
+    if (all.isEmpty) return const [];
+    final double s = _tStartMs, e = _tEndMs;
+    final out = <FlSpot>[];
+    FlSpot? left, right;
+    for (final p in all) {
+      if (p.x < s) left = p;
+      else if (p.x > e) { right ??= p; }
+      if (p.x >= s && p.x <= e) out.add(p);
+    }
+    if (left != null) out.insert(0, left);
+    if (right != null) out.add(right);
+    return out;
+  }
+
+  // 供雙指縮放初始化 Y 範圍
+  (double, double) _computeCurrentYRangeForZoom() {
+    if (_yManual && _yMinManual != null && _yMaxManual != null) {
+      return (_yMinManual!, _yMaxManual!);
+    }
+    final allY = <double>[];
+    allY.addAll(_cachedMainGlucose.map((e) => e.y));
+    for (final e in _cachedAddGlucose.values) {
+      allY.addAll(e.map((p) => p.y));
+    }
+    if (allY.isEmpty) return (0.0, 400.0);
+    final minV = allY.reduce(math.min);
+    final maxV = allY.reduce(math.max);
+    final span = (maxV - minV).abs();
+    final pad = span * 0.15 + 1e-12;
+    return (minV - pad, maxV + pad);
   }
 
   List<FlSpot> _applyWindowFixed(List<FlSpot> spots) {
@@ -510,6 +749,23 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       inWin.add(rightNeighbor);
     }
     return inWin;
+  }
+
+  // 決定數字顯示的小數位數，避免間隔太小被四捨五入成重覆文字
+  int _decimalsForInterval(double interval) {
+    final t = interval.abs();
+    if (t >= 10) return 0;
+    if (t >= 1) return 0;
+    if (t >= 0.1) return 1;
+    if (t >= 0.01) return 2;
+    if (t >= 0.001) return 3;
+    return 4;
+  }
+
+  // 把「左軸(血糖)的間隔」換算成「右軸(電流 nA)的間隔」，確保兩邊比例一致
+  double _mapLeftIntervalToRight(double leftInterval) {
+    if (widget.slope == 0) return leftInterval; // 避免除 0
+    return leftInterval / widget.slope;
   }
 
   String _formatTime(DateTime dt) =>
@@ -549,14 +805,14 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   double _currentToGlucose(double currentAmperes, {double? slope, double? intercept}) {
     final s = slope ?? widget.slope;
     final i = intercept ?? widget.intercept;
-    return s * (currentAmperes * 1e9) + i;
+    return s * (currentAmperes * 1e9) + i; // current(A)*1e9 = nA
   }
 
   double _glucoseToCurrent(double glucose, {double? slope, double? intercept}) {
     final s = slope ?? widget.slope;
     if (s == 0) return 0;
     final i = intercept ?? widget.intercept;
-    return (glucose - i) / s;
+    return (glucose - i) / s; // 回推 nA
   }
 
   List<LineChartBarData> _buildContinuousSegments(List<FlSpot> spots, Color color) {
@@ -634,37 +890,38 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   }
 
   double _calculateTimeInterval() {
-    final intervalMs = _currentWindowWidthMs / 6.0;
+    // 目標：在畫面上顯示約 6-12 個刻度
+    final targetTicks = 8;
+    final intervalMs = _currentWindowWidthMs / targetTicks;
     final intervalMinutes = intervalMs / oneMinuteMs;
 
     double niceIntervalMinutes;
 
+    // 根據間隔大小選擇合適的刻度單位
     if (intervalMinutes <= 1) {
-      niceIntervalMinutes = 1;
+      niceIntervalMinutes = 1;  // 1 分鐘
     } else if (intervalMinutes <= 2) {
-      niceIntervalMinutes = 2;
-    } else if (intervalMinutes <= 3) {
-      niceIntervalMinutes = 3;
+      niceIntervalMinutes = 2;  // 2 分鐘
     } else if (intervalMinutes <= 5) {
-      niceIntervalMinutes = 5;
+      niceIntervalMinutes = 5;  // 5 分鐘
     } else if (intervalMinutes <= 10) {
-      niceIntervalMinutes = 10;
+      niceIntervalMinutes = 10;  // 10 分鐘
     } else if (intervalMinutes <= 15) {
-      niceIntervalMinutes = 15;
-    } else if (intervalMinutes <= 20) {
-      niceIntervalMinutes = 20;
+      niceIntervalMinutes = 15;  // 15 分鐘
     } else if (intervalMinutes <= 30) {
-      niceIntervalMinutes = 30;
+      niceIntervalMinutes = 30;  // 30 分鐘
     } else if (intervalMinutes <= 60) {
-      niceIntervalMinutes = 60;
+      niceIntervalMinutes = 60;  // 1 小時
     } else if (intervalMinutes <= 120) {
-      niceIntervalMinutes = 120;
+      niceIntervalMinutes = 120;  // 2 小時
     } else if (intervalMinutes <= 180) {
-      niceIntervalMinutes = 180;
+      niceIntervalMinutes = 180;  // 3 小時
     } else if (intervalMinutes <= 240) {
-      niceIntervalMinutes = 240;
+      niceIntervalMinutes = 240;  // 4 小時
+    } else if (intervalMinutes <= 360) {
+      niceIntervalMinutes = 360;  // 6 小時
     } else {
-      niceIntervalMinutes = 360;
+      niceIntervalMinutes = 720;  // 12 小時
     }
 
     return niceIntervalMinutes * oneMinuteMs;
@@ -673,10 +930,16 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
   String _formatTimeLabel(DateTime dt, double intervalMs) {
     final intervalMinutes = intervalMs / oneMinuteMs;
 
-    if (intervalMinutes >= 60) {
+    if (intervalMinutes >= 120) {
+      // 2 小時以上：只顯示小時
+      final hh = dt.hour.toString().padLeft(2, '0');
+      return '$hh:00';
+    } else if (intervalMinutes >= 60) {
+      // 1 小時：顯示小時
       final hh = dt.hour.toString().padLeft(2, '0');
       return '$hh:00';
     } else {
+      // 小於 1 小時：顯示小時和分鐘
       final hh = dt.hour.toString().padLeft(2, '0');
       final mm = dt.minute.toString().padLeft(2, '0');
       return '$hh:$mm';
@@ -703,11 +966,9 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
     // 檢查是否需要重置（基於所有線的最新日期）
     DateTime? latestDateOverall;
-
     if (widget.samples.isNotEmpty) {
       latestDateOverall = widget.samples.last.ts;
     }
-
     if (widget.additionalLines != null) {
       for (final config in widget.additionalLines!) {
         if (config.samples.isNotEmpty) {
@@ -730,6 +991,8 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
             _touchedX = null;
             _tooltipText = null;
             _touchedLineId = null;
+            _yManual = false;
+            _yMinManual = _yMaxManual = null;
             _initializeWindow();
           });
         }
@@ -738,24 +1001,23 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
     final todaySamples = _filterTodaySamples(widget.samples);
     final hasData = todaySamples.isNotEmpty;
-    final bleConnected = ref.watch(bleConnectionStateProvider); // 讀取藍牙連線狀態（控制要不要計時）
+    final bleConnected = ref.watch(bleConnectionStateProvider);
 
-    // ★ 偵測新點：第一次或出現更晚的 ts
+    // ★ 偵測新點
     if (hasData) {
       final newLast = todaySamples.last.ts;
       final isNewPoint = _lastSampleTime == null || newLast.isAfter(_lastSampleTime!);
 
       if (isNewPoint) {
         _lastSampleTime = newLast;
-        _elapsedSec = 0;            // 歸零
+        _elapsedSec = 0;
         if (bleConnected) {
-          _startElapsedTicker();    // 已連線就每秒累加
+          _startElapsedTicker();
         } else {
           _stopElapsedTicker(reset: false);
         }
       }
     } else {
-      // 沒有任何資料 → 停止與歸零
       _lastSampleTime = null;
       _stopElapsedTicker(reset: true);
     }
@@ -763,6 +1025,14 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     if (hasData && _firstDataTime == null) {
       _firstDataTime = todaySamples.first.ts;
       _initializeWindow();
+    }
+
+    // 建立/更新快取（僅筆數變化才重建）
+    _rebuildCachedSpotsIfNeeded();
+
+    if (hasData) {
+      final latestX = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
+      _advanceWindowIfNeeded(latestX);
     }
 
     final latestSample = hasData ? todaySamples.last : null;
@@ -786,91 +1056,21 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         : currentA.toStringAsFixed(6))
         : '--';
 
-    // 處理主線數據
-    final currBasisSpots = () {
-      if (!hasData) {
-        _rawCurrentSpots = _buildPlaceholderSpots(
-          (_currentWindowWidthMs / 1000).toInt(),
-          widget.placeholderCurrentA,
-        );
-        return _rawCurrentSpots;
-      }
+    // 以快取 + 視窗裁切輸出
+    final glucoseFromCurrentWin = _inWindow(_cachedMainGlucose);
 
-      _rawCurrentSpots = _mapToSortedSpots(todaySamples, (s) => _getCurrent(s));
-      return _rawCurrentSpots;
-    }();
-
-    if (hasData) {
-      final latestX = todaySamples.last.ts.millisecondsSinceEpoch.toDouble();
-      _advanceWindowIfNeeded(latestX);
-    }
-
-    var currWin = _applyWindowFixed(currBasisSpots);
-    final hasDataInWindow = currWin.isNotEmpty && hasData;
-
-    if (currWin.isEmpty) {
-      currWin = _buildWindowAlignedPlaceholder(_tStartMs, _tEndMs, widget.placeholderCurrentA);
-    }
-
-    final glucoseFromCurrentWin = currWin
-        .map((p) => FlSpot(p.x, _currentToGlucose(p.y)))
-        .toList();
-
-    // 處理額外的線
+    // 額外線
     final List<List<FlSpot>> additionalGlucoseSpots = [];
-
     if (widget.additionalLines != null) {
       for (final config in widget.additionalLines!) {
-        final samples = _filterTodaySamples(config.samples);
-        final spots = samples.isNotEmpty
-            ? _mapToSortedSpots(samples, (s) => _getCurrent(s))
-            : <FlSpot>[];
-
-        _rawSpotsMap[config.id] = spots;
-
-        if (samples.isNotEmpty) {
-          final latestX = samples.last.ts.millisecondsSinceEpoch.toDouble();
-          _advanceWindowIfNeeded(latestX);
-        }
-
-        var win = _applyWindowFixed(spots);
-        if (win.isEmpty) {
-          win = [];
-        }
-
-        final glucoseSpots = win
-            .map((p) => FlSpot(p.x, _currentToGlucose(p.y, slope: config.slope, intercept: config.intercept)))
-            .toList();
-
-        additionalGlucoseSpots.add(glucoseSpots);
+        final cached = _cachedAddGlucose[config.id] ?? const <FlSpot>[];
+        additionalGlucoseSpots.add(_inWindow(cached));
       }
     }
 
-    double? safeMin = glucoseRange.min;
-    double? safeMax = glucoseRange.max;
-
-    if (safeMin != null && safeMax != null) {
-      final unreasonable =
-          safeMin.abs() > 1000 ||
-              safeMax.abs() > 1000 ||
-              (safeMax - safeMin).abs() > 2000 ||
-              safeMin >= safeMax;
-      if (unreasonable) {
-        safeMin = null;
-        safeMax = null;
-      }
-    }
-
-    if (!hasDataInWindow && additionalGlucoseSpots.every((s) => s.isEmpty)) {
-      if (safeMin == null || safeMax == null) {
-        safeMin = 0.0;
-        safeMax = 400.0;
-      }
-    }
-
-    // 收集所有線的Y值來計算範圍
+    // 組合所有線的 Y 值
     final allYValues = <double>[];
-    if (hasDataInWindow) {
+    if (glucoseFromCurrentWin.isNotEmpty) {
       allYValues.addAll(glucoseFromCurrentWin.map((e) => e.y));
     }
     for (final spots in additionalGlucoseSpots) {
@@ -879,14 +1079,26 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       }
     }
 
+    // 計算顯示範圍（Y）：手動優先，其次使用 provider 設定或自動
+    _Range gluRange;
     final hasUserRange = glucoseRange.min != null && glucoseRange.max != null;
-    final gluRange = _calcRange(
-      allYValues,
-      fixedMin: hasUserRange ? glucoseRange.min : null,
-      fixedMax: hasUserRange ? glucoseRange.max : null,
-      targetTicks: 12,
-    );
 
+    if (_yManual && _yMinManual != null && _yMaxManual != null) {
+      gluRange = _Range(_yMinManual!, _yMaxManual!); // ← 手動優先
+    } else if (hasUserRange) {
+      gluRange = _calcRange(
+        allYValues,
+        fixedMin: glucoseRange.min,
+        fixedMax: glucoseRange.max,
+        targetTicks: 12,
+      );
+    } else {
+      gluRange = _calcRange(allYValues, targetTicks: 12); // 自動（依目前視窗）
+    }
+
+    if (allYValues.isEmpty && !_yManual) {
+      gluRange = const _Range(0.0, 400.0);
+    }
 
     final minX = _tStartMs;
     final maxX = _tEndMs;
@@ -917,12 +1129,12 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     allLineBars.add(invisibleBaseline);
 
     // 主線（藍色）
-    if (hasDataInWindow && glucoseFromCurrentWin.length >= 2) {
+    if (glucoseFromCurrentWin.length >= 2) {
       allLineBars.addAll(_buildContinuousSegments(glucoseFromCurrentWin, Colors.blue));
       allLineBars.addAll(_buildGapSegments(glucoseFromCurrentWin, Colors.blue));
     }
 
-    if (hasDataInWindow) {
+    if (glucoseFromCurrentWin.isNotEmpty) {
       allLineBars.add(LineChartBarData(
         spots: glucoseFromCurrentWin,
         isCurved: false,
@@ -931,9 +1143,11 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         dotData: FlDotData(
           show: true,
           getDotPainter: (spot, percent, barData, index) {
+            // ✅ 判斷是否為最新的點（最後一個）
+            final isLatest = index == glucoseFromCurrentWin.length - 1;
             return FlDotCirclePainter(
-              radius: 3,
-              color: Colors.blue,
+              radius: isLatest ? 4 : 3,  // 最新點稍微大一點
+              color: isLatest ? Colors.red : Colors.blue,  // 最新點紅色，其他藍色
               strokeWidth: 1.5,
               strokeColor: Colors.white,
             );
@@ -962,9 +1176,11 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
             dotData: FlDotData(
               show: true,
               getDotPainter: (spot, percent, barData, index) {
+                // ✅ 判斷是否為最新的點（最後一個）
+                final isLatest = index == glucoseSpots.length - 1;
                 return FlDotCirclePainter(
-                  radius: 3,
-                  color: config.color,
+                  radius: isLatest ? 4 : 3,  // 最新點稍微大一點
+                  color: isLatest ? Colors.red : config.color,  // 最新點紅色，其他用線的顏色
                   strokeWidth: 1.5,
                   strokeColor: Colors.white,
                 );
@@ -989,7 +1205,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text('${voltage?.toStringAsFixed(3) ?? '--'} (V)'),
+                      Text('電池：${voltage?.toStringAsFixed(3) ?? '--'} (V)'),
                       Text('電流：$currentDisplay A'),
                       Text('時間：$timestamp'),
                       if (isToday && bleConnected && _lastSampleTime != null)
@@ -1022,262 +1238,282 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         Expanded(
           child: Stack(
             children: [
-              // ✅ 使用 Listener 手動追蹤觸摸點
-              Listener(
-                onPointerDown: _onPointerDown,
-                onPointerMove: _onPointerMove,
-                onPointerUp: _onPointerUp,
-                onPointerCancel: _onPointerCancel,
-                child: LineChart(
-                  LineChartData(
-                    minX: minX,
-                    maxX: maxX,
-                    minY: gluRange.min,
-                    maxY: gluRange.max,
-                    clipData: const FlClipData(left: true, top: true, right: true, bottom: true),
-                    lineBarsData: allLineBars,
-                    gridData: FlGridData(
-                      show: true,
-                      drawVerticalLine: true,
-                      drawHorizontalLine: true,
-                      horizontalInterval: safeLeftInterval,
-                      verticalInterval: timeInterval,
-                      getDrawingHorizontalLine: (value) => FlLine(
-                        color: Colors.grey.withOpacity(0.8),
-                        strokeWidth: 1.0,
-                      ),
-                      getDrawingVerticalLine: (value) => FlLine(
-                        color: Colors.grey.withOpacity(0.8),
-                        strokeWidth: 1.0,
-                      ),
-                    ),
-                    titlesData: FlTitlesData(
-                      leftTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 30,
-                          interval: safeLeftInterval,
-                          getTitlesWidget: (v, _) {
-                            final text = v.toStringAsFixed(0);
-                            return Text(text, style: const TextStyle(fontSize: 9));
-                          },
+              // ✅ 雙擊復位 + Listener 手勢
+              GestureDetector(
+                onDoubleTap: () {
+                  setState(() {
+                    // X 回預設
+                    _isManualMode = false;
+                    _currentWindowWidthMs = defaultWindowMs;
+                    _initializeWindow();
+
+                    // Y 回自動
+                    _yManual = false;
+                    _yMinManual = _yMaxManual = null;
+                  });
+                },
+                child: Listener(
+                  onPointerDown: _onPointerDown,
+                  onPointerMove: _onPointerMove,
+                  onPointerUp: _onPointerUp,
+                  onPointerCancel: _onPointerCancel,
+                  child: LineChart(
+                    LineChartData(
+                      minX: minX,
+                      maxX: maxX,
+                      minY: gluRange.min,
+                      maxY: gluRange.max,
+                      clipData: const FlClipData(left: true, top: true, right: true, bottom: true),
+                      lineBarsData: allLineBars,
+                      gridData: FlGridData(
+                        show: true,
+                        drawVerticalLine: true,
+                        drawHorizontalLine: true,
+                        horizontalInterval: safeLeftInterval,
+                        verticalInterval: timeInterval,
+                        getDrawingHorizontalLine: (value) => FlLine(
+                          color: Colors.grey.withOpacity(0.8),
+                          strokeWidth: 1.0,
                         ),
-                        axisNameWidget: const Padding(
-                          padding: EdgeInsets.only(right: 8, bottom: 4),
-                          child: Text('Glu conc (mg/dL)'),
+                        getDrawingVerticalLine: (value) => FlLine(
+                          color: Colors.grey.withOpacity(0.8),
+                          strokeWidth: 1.0,
                         ),
-                        axisNameSize: 20,
                       ),
-                      rightTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 30,
-                          interval: safeRightInterval,
+                      titlesData: FlTitlesData(
+                        leftTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 30,
+                            interval: safeLeftInterval,
+                            getTitlesWidget: (v, _) {
+                              final text = v.toStringAsFixed(0);
+                              return Text(text, style: const TextStyle(fontSize: 9));
+                            },
+                          ),
+                          axisNameWidget: const Padding(
+                            padding: EdgeInsets.only(right: 8, bottom: 4),
+                            child: Text('Glu conc (mg/dL)'),
+                          ),
+                          axisNameSize: 20,
+                        ),
+                        rightTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 34,
+                            interval: safeRightInterval,
                             getTitlesWidget: (glucoseValue, _) {
-                              // 直接取回「nA」
-                              final currentNa = _glucoseToCurrent(glucoseValue); // nA
-
-                              String text;
-                              if (currentNa.abs() < 0.01) {
-                                text = '0.00';
-                              } else {
-                                text = currentNa.toStringAsFixed(2);
-                              }
+                              // 右軸顯示 nA（由左軸使用相同公式反推）
+                              final currentNa = _glucoseToCurrent(glucoseValue);
+                              final text = (currentNa.abs() < 0.01)
+                                  ? '0.00'
+                                  : currentNa.toStringAsFixed(2);
                               return Text(text, style: const TextStyle(fontSize: 8));
+                            },
+                          ),
+                          axisNameWidget: const Padding(
+                            padding: EdgeInsets.only(right: 8, bottom: 4),
+                            child: Text('Current (1E - 9 A)'),
+                          ),
+                          axisNameSize: 20,
+                        ),
+                        topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+                        bottomTitles: AxisTitles(
+                          sideTitles: SideTitles(
+                            showTitles: true,
+                            reservedSize: 28,
+                            interval: timeInterval,
+                            getTitlesWidget: (value, meta) {
+                              final dt = DateTime.fromMillisecondsSinceEpoch(value.toInt());
+                              final label = _formatTimeLabel(dt, timeInterval);
+                              return Text(label, style: const TextStyle(fontSize: 10));
+                            },
+                          ),
+                          axisNameWidget: const Padding(
+                            padding: EdgeInsets.only(left: 4),
+                            child: Text('Time (HH:mm)'),
+                          ),
+                        ),
+                      ),
+                      borderData: FlBorderData(
+                        show: true,
+                        border: Border.all(color: Colors.grey, width: 1),
+                      ),
+                      lineTouchData: LineTouchData(
+                        touchSpotThreshold: 4,
+                        enabled: !_isDragging && !_isScaling,
+                        handleBuiltInTouches: true,
+                        touchTooltipData: LineTouchTooltipData(
+                          getTooltipColor: (_) => Colors.transparent,
+                          tooltipPadding: EdgeInsets.zero,
+                          tooltipMargin: 0,
+                          getTooltipItems: (touchedSpots) =>
+                              touchedSpots.map((_) => null).toList(),
+                        ),
+                        getTouchedSpotIndicator: (barData, spotIndexes) {
+                          return spotIndexes.map((index) {
+                            Color indicatorColor = Colors.blue;
+                            if (barData.color != null && barData.color != Colors.transparent) {
+                              indicatorColor = barData.color!;
                             }
 
-                        ),
-                        axisNameWidget: const Padding(
-                          padding: EdgeInsets.only(right: 8, bottom: 4),
-                          child: Text('Current (1E - 9)'),
-                        ),
-                        axisNameSize: 20,
-                      ),
-                      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 28,
-                          interval: timeInterval,
-                          getTitlesWidget: (value, meta) {
-                            final dt = DateTime.fromMillisecondsSinceEpoch(value.toInt());
-                            final label = _formatTimeLabel(dt, timeInterval);
-                            return Text(label, style: const TextStyle(fontSize: 10));
-                          },
-                        ),
-                        axisNameWidget: const Padding(
-                          padding: EdgeInsets.only(left: 4),
-                          child: Text('Time (HH:mm)'),
-                        ),
-                      ),
-                    ),
-                    borderData: FlBorderData(
-                      show: true,
-                      border: Border.all(color: Colors.grey, width: 1),
-                    ),
-                    lineTouchData: LineTouchData(
-                      touchSpotThreshold: 4,
-                      enabled: !_isDragging && !_isScaling,
-                      handleBuiltInTouches: true,
-                      touchTooltipData: LineTouchTooltipData(
-                        getTooltipColor: (_) => Colors.transparent,
-                        tooltipPadding: EdgeInsets.zero,
-                        tooltipMargin: 0,
-                        getTooltipItems: (touchedSpots) =>
-                            touchedSpots.map((_) => null).toList(),
-                      ),
-                      getTouchedSpotIndicator: (barData, spotIndexes) {
-                        return spotIndexes.map((index) {
-                          Color indicatorColor = Colors.blue;
-                          if (barData.color != null && barData.color != Colors.transparent) {
-                            indicatorColor = barData.color!;
-                          }
+                            return TouchedSpotIndicatorData(
+                              FlLine(
+                                color: indicatorColor.withOpacity(0.8),
+                                strokeWidth: 2,
+                                dashArray: [5, 5],
+                              ),
+                              FlDotData(
+                                show: true,
+                                getDotPainter: (spot, percent, barData, index) {
+                                  return FlDotCirclePainter(
+                                    radius: 6,
+                                    color: indicatorColor,
+                                    strokeWidth: 3,
+                                    strokeColor: Colors.white,
+                                  );
+                                },
+                              ),
+                            );
+                          }).toList();
+                        },
+                        touchCallback: (FlTouchEvent event, LineTouchResponse? response) {
+                          if (_isDragging || _isScaling) return;
 
-                          return TouchedSpotIndicatorData(
-                            FlLine(
-                              color: indicatorColor.withOpacity(0.8),
-                              strokeWidth: 2,
-                              dashArray: [5, 5],
-                            ),
-                            FlDotData(
-                              show: true,
-                              getDotPainter: (spot, percent, barData, index) {
-                                return FlDotCirclePainter(
-                                  radius: 6,
-                                  color: indicatorColor,
-                                  strokeWidth: 3,
-                                  strokeColor: Colors.white,
-                                );
-                              },
-                            ),
-                          );
-                        }).toList();
-                      },
-                      touchCallback: (FlTouchEvent event, LineTouchResponse? response) {
-                        if (_isDragging || _isScaling) return;
+                          final isEndTap = event is FlTapUpEvent || event is FlLongPressEnd;
+                          final isMoveUpdate = event is FlPanUpdateEvent;
 
-                        final isEndTap = event is FlTapUpEvent || event is FlLongPressEnd;
-                        final isMoveUpdate = event is FlPanUpdateEvent;
+                          if (isMoveUpdate) return;
 
-                        if (isMoveUpdate) return;
+                          final spots = response?.lineBarSpots ?? const [];
 
-                        final spots = response?.lineBarSpots ?? const [];
-
-                        if (isEndTap) {
-                          if (spots.isEmpty) {
-                            setState(() {
-                              _touchedX = null;
-                              _touchedY = null;
-                              _tooltipText = null;
-                              _touchedLineId = null;
-                            });
-                          } else {
-                            // 找出被點擊的線（優先選擇有顏色的線，跳過隱形基線）
-                            LineBarSpot? selectedSpot;
-                            for (final spot in spots) {
-                              if (spot.bar.color != null &&
-                                  spot.bar.color != Colors.transparent) {
-                                selectedSpot = spot;
-                                break;
-                              }
-                            }
-
-                            if (selectedSpot == null) return;
-
-                            final hit = selectedSpot;
-                            final hitX = hit.x;
-
-                            // 判斷是主線還是額外線
-                            bool isMainLine = hit.bar.color == Colors.blue;
-                            String lineLabel = '主線';
-                            double lineSlope = widget.slope;
-                            double lineIntercept = widget.intercept;
-                            List<FlSpot> rawSpots = _rawCurrentSpots;
-
-                            if (!isMainLine && widget.additionalLines != null) {
-                              for (final config in widget.additionalLines!) {
-                                if (config.color == hit.bar.color) {
-                                  _touchedLineId = config.id;
-                                  lineLabel = config.label;
-                                  lineSlope = config.slope;
-                                  lineIntercept = config.intercept;
-                                  rawSpots = _rawSpotsMap[config.id] ?? [];
+                          if (isEndTap) {
+                            if (spots.isEmpty) {
+                              setState(() {
+                                _touchedX = null;
+                                _touchedY = null;
+                                _tooltipText = null;
+                                _touchedLineId = null;
+                              });
+                            } else {
+                              // 找出被點擊的線（優先選擇有顏色的線，跳過隱形基線）
+                              LineBarSpot? selectedSpot;
+                              for (final spot in spots) {
+                                if (spot.bar.color != null &&
+                                    spot.bar.color != Colors.transparent) {
+                                  selectedSpot = spot;
                                   break;
                                 }
                               }
-                            } else {
-                              _touchedLineId = 'main';
-                            }
 
-                            // 從原始數據中找到最接近的點
-                            FlSpot? closestRawSpot;
-                            double minDistance = double.infinity;
-                            for (final raw in rawSpots) {
-                              if (raw.x >= _tStartMs && raw.x < _tEndMs) {
-                                final d = (raw.x - hitX).abs();
-                                if (d < minDistance) {
-                                  minDistance = d;
-                                  closestRawSpot = raw;
+                              if (selectedSpot == null) return;
+
+                              final hit = selectedSpot;
+                              final hitX = hit.x;
+
+                              // 判斷是主線還是額外線
+                              bool isMainLine = hit.bar.color == Colors.blue;
+                              String lineLabel = '主線';
+                              double lineSlope = widget.slope;
+                              double lineIntercept = widget.intercept;
+                              List<FlSpot> rawSpots = _rawCurrentSpots;
+
+                              if (!isMainLine && widget.additionalLines != null) {
+                                for (final config in widget.additionalLines!) {
+                                  if (config.color == hit.bar.color) {
+                                    _touchedLineId = config.id;
+                                    lineLabel = config.label;
+                                    lineSlope = config.slope;
+                                    lineIntercept = config.intercept;
+                                    rawSpots = _rawSpotsMap[config.id] ?? [];
+                                    break;
+                                  }
+                                }
+                              } else {
+                                _touchedLineId = 'main';
+                              }
+
+                              // 從原始數據中找到最接近的點
+                              FlSpot? closestRawSpot;
+                              double minDistance = double.infinity;
+                              for (final raw in rawSpots) {
+                                if (raw.x >= _tStartMs && raw.x < _tEndMs) {
+                                  final d = (raw.x - hitX).abs();
+                                  if (d < minDistance) {
+                                    minDistance = d;
+                                    closestRawSpot = raw;
+                                  }
                                 }
                               }
+
+                              final target = closestRawSpot ??
+                                  FlSpot(
+                                      hit.x,
+                                      _glucoseToCurrent(
+                                        hit.y,
+                                        slope: lineSlope,
+                                        intercept: lineIntercept,
+                                      ) * 1e-9 // nA -> A（原註解延續；這裡僅當備用）
+                                  );
+
+                              final displaySpot = FlSpot(
+                                target.x,
+                                _currentToGlucose(
+                                  target.y,
+                                  slope: lineSlope,
+                                  intercept: lineIntercept,
+                                ),
+                              );
+
+                              final dt = DateTime.fromMillisecondsSinceEpoch(displaySpot.x.toInt());
+                              final timeStr = _formatTime(dt);
+                              final currentNa = _glucoseToCurrent(
+                                displaySpot.y,
+                                slope: lineSlope,
+                                intercept: lineIntercept,
+                              ); // nA
+
+                              setState(() {
+                                _touchedX = displaySpot.x;
+                                _touchedY = displaySpot.y;
+                                _tooltipText = isMainLine
+                                    ? '時間: $timeStr\n'
+                                    '血糖: ${displaySpot.y.toStringAsFixed(2)} mg/dL\n'
+                                    '電流: ${currentNa.toStringAsFixed(2)} nA\n'
+                                    '(實際採樣值)'
+                                    : '【$lineLabel】\n'
+                                    '時間: $timeStr\n'
+                                    '血糖: ${displaySpot.y.toStringAsFixed(2)} mg/dL\n'
+                                    '電流: ${currentNa.toStringAsFixed(2)} nA';
+                              });
                             }
-
-                            final target = closestRawSpot ?? FlSpot(
-                                hit.x,
-                                _glucoseToCurrent(hit.y, slope: lineSlope, intercept: lineIntercept) * 1e-9 // nA -> A
-                            );
-
-                            final displaySpot = FlSpot(
-                              target.x,
-                              _currentToGlucose(target.y, slope: lineSlope, intercept: lineIntercept),
-                            );
-
-                            final dt = DateTime.fromMillisecondsSinceEpoch(displaySpot.x.toInt());
-                            final timeStr = _formatTime(dt);
-                            final currentNa = _glucoseToCurrent(displaySpot.y, slope: lineSlope, intercept: lineIntercept); // nA
-                            final currentNanoAmperes = currentNa;         // 直接用 nA 顯示就好
-
-
-                            setState(() {
-                              _touchedX = displaySpot.x;
-                              _touchedY = displaySpot.y;
-                              _tooltipText = isMainLine
-                                  ? '時間: $timeStr\n'
-                                  '血糖: ${displaySpot.y.toStringAsFixed(2)} mg/dL\n'
-                                  '電流: ${currentNanoAmperes.toStringAsFixed(2)} nA\n'
-                                  '(實際採樣值)'
-                                  : '【$lineLabel】\n'
-                                  '時間: $timeStr\n'
-                                  '血糖: ${displaySpot.y.toStringAsFixed(2)} mg/dL\n'
-                                  '電流: ${currentNanoAmperes.toStringAsFixed(2)} nA';
-                            });
                           }
-                        }
-                      },
-                    ),
-                    extraLinesData: ExtraLinesData(
-                      horizontalLines: _touchedY != null
-                          ? [
-                        HorizontalLine(
-                          y: _touchedY!,
-                          color: _getTouchedLineColor().withOpacity(0.8),
-                          strokeWidth: 2,
-                          dashArray: [5, 5],
-                          label: HorizontalLineLabel(show: false),
-                        ),
-                      ]
-                          : [],
-                      verticalLines: _touchedX != null
-                          ? [
-                        VerticalLine(
-                          x: _touchedX!,
-                          color: _getTouchedLineColor().withOpacity(0.8),
-                          strokeWidth: 2,
-                          dashArray: [5, 5],
-                          label: VerticalLineLabel(show: false),
-                        ),
-                      ]
-                          : [],
+                        },
+                      ),
+                      extraLinesData: ExtraLinesData(
+                        horizontalLines: _touchedY != null
+                            ? [
+                          HorizontalLine(
+                            y: _touchedY!,
+                            color: _getTouchedLineColor().withOpacity(0.8),
+                            strokeWidth: 2,
+                            dashArray: [5, 5],
+                            label: HorizontalLineLabel(show: false),
+                          ),
+                        ]
+                            : [],
+                        verticalLines: _touchedX != null
+                            ? [
+                          VerticalLine(
+                            x: _touchedX!,
+                            color: _getTouchedLineColor().withOpacity(0.8),
+                            strokeWidth: 2,
+                            dashArray: [5, 5],
+                            label: VerticalLineLabel(show: false),
+                          ),
+                        ]
+                            : [],
+                      ),
                     ),
                   ),
                 ),
@@ -1432,14 +1668,18 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
   String _formatWindowDuration(double durationMs) {
     final minutes = durationMs / oneMinuteMs;
-    if (minutes < 60) {
+    if (minutes < 1) {
+      return '${(minutes * 60).toStringAsFixed(0)} 秒';
+    } else if (minutes < 60) {
       return '${minutes.toStringAsFixed(0)} 分鐘';
     } else {
       final hours = minutes / 60;
-      if (hours < 24) {
-        return '${hours.toStringAsFixed(1)} 小時';
+      if (hours >= 36) {
+        return '36 小時';
+      } else if (hours.floor() == hours) {
+        return '${hours.toStringAsFixed(0)} 小時';
       } else {
-        return '24 小時';
+        return '${hours.toStringAsFixed(1)} 小時';
       }
     }
   }
@@ -1474,7 +1714,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
 
     return List<FlSpot>.generate(numPoints, (i) {
       final t = startMs + i * intervalMs;
-      final y = 0.0;
+      const y = 0.0;
       return FlSpot(t, y);
     });
   }
@@ -1494,25 +1734,24 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
     // 1) 若使用者有指定上下限（任一個），就以使用者值為主，另一邊用資料推得（或合理預設），
     //    並且「不做」padding / nice 刻度，避免 3000 變 520。
     if (fixedMin != null || fixedMax != null) {
-      // 用資料或預設補齊另一邊
       final dataMin = values.isEmpty ? 0.0 : values.reduce(math.min);
       final dataMax = values.isEmpty ? 400.0 : values.reduce(math.max);
 
       double minV = fixedMin ?? dataMin;
       double maxV = fixedMax ?? dataMax;
 
-      // 若 min/max 反了或相等，做最小幅度的保護
       if (!minV.isFinite || !maxV.isFinite) {
-        minV = 0.0; maxV = 400.0;
+        minV = 0.0;
+        maxV = 400.0;
       }
       if (minV >= maxV) {
-        // 只要避免相等或反序即可，給一個很小的跨度
         const eps = 1e-6;
         if (minV == maxV) {
-          maxV = minV + 1.0; // 或者給你想要的最小刻度
+          maxV = minV + 1.0;
         } else {
-          // min > max，交換
-          final t = minV; minV = maxV; maxV = t;
+          final t = minV;
+          minV = maxV;
+          maxV = t;
           if ((maxV - minV) < eps) maxV = minV + 1.0;
         }
       }
@@ -1520,7 +1759,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       return _Range(minV, maxV);
     }
 
-    // 2) 沒有固定範圍 → 走自動模式（跟你原本邏輯類似）
+    // 2) 沒有固定範圍 → 自動模式
     double minV, maxV;
 
     if (values.isEmpty) {
@@ -1531,12 +1770,10 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       final rawMax = values.reduce(math.max);
 
       final span = (rawMax - rawMin).abs();
-      // 給 15% padding（你原本的做法）
       final pad = span * 0.15 + 1e-12;
       minV = rawMin - pad;
       maxV = rawMax + pad;
 
-      // 當所有值幾乎一樣時，給對稱的最小範圍
       if (span < 1e-10) {
         final center = (minV + maxV) / 2.0;
         final absCenter = center.abs();
@@ -1549,7 +1786,6 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
         }
       }
 
-      // nice 刻度（自動模式下才做）
       final interval = _niceInterval(minV, maxV, targetTicks);
       if (interval > 0 && interval.isFinite) {
         minV = (minV / interval).floor() * interval;
@@ -1557,21 +1793,19 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> {
       }
     }
 
-    // 最終保護
     if (!minV.isFinite || !maxV.isFinite || minV >= maxV) {
-      minV = 0.0; maxV = 400.0;
+      minV = 0.0;
+      maxV = 400.0;
     }
 
     return _Range(minV, maxV);
   }
-
 
   double _niceInterval(double min, double max, int targetTicks) {
     final span = (max - min).abs();
     if (span <= 0) return 1;
 
     final raw = span / math.max(1, targetTicks);
-
     if (raw < 1e-10) return 1e-10;
 
     final exponent = (math.log(raw) / math.ln10).floor();

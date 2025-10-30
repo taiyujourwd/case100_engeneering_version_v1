@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../ble/ble_service.dart';
 import '../ble/ble_connection_mode.dart';
@@ -27,9 +30,47 @@ class BleTaskHandler extends TaskHandler {
   static const _cacheExpireDuration = Duration(seconds: 10);  // ✅ 增加到 10 秒
   static const _maxCacheSize = 200;  // ✅ 增加緩存大小
 
+  IOSink? _bleLogSink;
+
+  // 初始化（例如在 initState 或服務啟動時呼叫一次）
+  Future<void> _initBleLogSink() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/ble_data_log.txt');
+    // 若檔案不存在自動建立；使用 append 模式
+    _bleLogSink = file.openWrite(mode: FileMode.append);
+  }
+
+// 安全釋放（例如在 dispose 或服務結束時）
+  Future<void> _closeBleLogSink() async {
+    await _bleLogSink?.flush();
+    await _bleLogSink?.close();
+    _bleLogSink = null;
+  }
+
+// 非阻塞寫入：不要 await、不要每筆 open/close
+  void _enqueueLog(BleDeviceData data) {
+    try {
+      final line = jsonEncode({
+        'id': data.id,
+        'name': data.name,
+        'rssi': data.rssi,
+        'timestamp': data.timestamp?.toIso8601String(),
+        'voltage': data.voltage,
+        'temperature': data.temperature,
+        'currents': data.currents,
+        'rawData': data.rawData,
+      });
+      _bleLogSink?.writeln(line); // non-blocking buffer
+    } catch (e) {
+      debugPrint('❌ [FG] 寫檔序列化失敗: $e');
+    }
+  }
+
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     debugPrint('🚀 前景服務已啟動');
+
+    _initBleLogSink();
 
     try {
       // 初始化 Repository
@@ -161,46 +202,74 @@ class BleTaskHandler extends TaskHandler {
     return false;
   }
 
+  Future<void> _saveDataToFile(BleDeviceData data) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/ble_data_log.txt');
+
+      // 每筆資料用一行 JSON
+      await file.writeAsString('${data.toJsonString()}\n', mode: FileMode.append);
+
+      debugPrint('📂 [FG] 已寫入檔案: ${file.path}');
+    } catch (e) {
+      debugPrint('❌ [FG] 寫檔失敗: $e');
+    }
+  }
+
   // 處理接收到的設備數據
   void _onDeviceData(BleDeviceData data) async {
-    _dataCount++;
-    _lastDataTime = DateTime.now();
+    try {
+      _dataCount++;
+      _lastDataTime = DateTime.now();
 
-    // 去重檢查
-    if (data.timestamp != null) {
-      final deviceId = _targetDeviceName ?? data.id;
-      if (_isDuplicateData(deviceId, data.timestamp!)) {
-        // ✅ 仍然更新通知（但不寫入資料庫）
-        _updateNotification();
-        return;
+      // ⚠️ 千萬不要在這裡 await 寫檔
+      _enqueueLog(data); // 非阻塞排入緩衝
+
+      // 去重檢查（與既有邏輯相同）
+      if (data.timestamp != null) {
+        final deviceId = _targetDeviceName ?? data.id;
+        if (_isDuplicateData(deviceId, data.timestamp!)) {
+          _updateNotification(); // 保持原本行為
+          return;
+        }
       }
-    }
 
-    debugPrint('📊 [FG] 收到新數據 #$_dataCount: ${data.name}');
+      debugPrint('📊 [FG] 收到新數據 #$_dataCount: ${data.name}'
+          ' currentsLen=${data.currents.length} ts=${data.timestamp}');
 
-    // 寫入資料庫
-    if (_repo != null &&
-        data.timestamp != null &&
-        data.timestamp!.year == DateTime.now().year &&
-        data.currents.isNotEmpty) {
-      try {
-        final sample = makeSampleFromBle(
-          deviceId: _targetDeviceName ?? data.id,
-          timestamp: data.timestamp!,
-          currents: data.currents,
-          voltage: data.voltage,
-          temperature: data.temperature,
-        );
+      // ✅ 用「合理時間範圍」替代嚴格的年份等於判斷
+      final ts = data.timestamp;
+      final now = DateTime.now();
+      final bool tsOk = ts != null &&
+          ts.isAfter(now.subtract(const Duration(days: 1))) &&
+          ts.isBefore(now.add(const Duration(days: 1)));
 
-        await _repo!.addSample(sample);
-        debugPrint('💾 [FG] 已寫入資料庫');
-      } catch (e) {
-        debugPrint('❌ [FG] 寫入失敗：$e');
+      if (_repo != null && tsOk && data.currents.isNotEmpty) {
+        try {
+          final sample = makeSampleFromBle(
+            deviceId: _targetDeviceName ?? data.id,
+            timestamp: ts!,               // tsOk 已保證非空
+            currents: data.currents,
+            voltage: data.voltage,
+            temperature: data.temperature,
+          );
+
+          await _repo!.addSample(sample); // 這是圖表資料來源的關鍵
+          debugPrint('💾 [FG] 已寫入資料庫');
+        } catch (e, st) {
+          debugPrint('❌ [FG] 寫入失敗：$e\n$st');
+        }
+      } else {
+        if (_repo == null) debugPrint('⚠️ [FG] _repo 為 null，無法寫 DB');
+        if (!tsOk) debugPrint('⚠️ [FG] timestamp 超出合理範圍：$ts');
+        if (data.currents.isEmpty) debugPrint('⚠️ [FG] currents 為空');
       }
-    }
 
-    // 更新通知
-    _updateNotification();
+      // 放最後，避免阻塞前面主流程
+      _updateNotification();
+    } catch (e, st) {
+      debugPrint('❌ [FG] _onDeviceData 未捕捉例外：$e\n$st');
+    }
   }
 
   // ✅ 更新通知

@@ -104,7 +104,7 @@ class DataSmoother {
   /// - 三段參數都有預設值，直接呼叫即可
   /// - 回傳「最新平滑值」，若資料不足則回傳 null
   double? smooth3({
-    double? value,                 // 如果你有這個參數，是否 addData 依你的設計
+    double? value,                 // 如果有這個參數，是否 addData
     required int trimN,
     required double trimC,
     required double trimDelta,
@@ -115,13 +115,10 @@ class DataSmoother {
     required double p,
     required bool keepHeadOriginal,
   }) {
-    // （可選）如果你本來會在這裡 addData(value)，就保留；否則忽略
-    // if (value != null) addData(value);
-
     final bufLen = _dataBuffer.length;
     if (bufLen == 0) return null;               // 沒資料：直接返回
 
-    // 各段視窗：只取 <= 當前 buffer 長度
+    // 只取 <= 當前 buffer 長度
     final tN = math.min(trimN, bufLen);
     final kN = math.min(kalmanN, bufLen);
     final wN = math.min(weightN, bufLen);
@@ -165,7 +162,7 @@ class DataSmoother {
   bool get isEmpty => _dataBuffer.isEmpty;
 
   // =========================================================
-  // 新增：一鍵處理管線（修剪 → 卡爾曼 → 加權平均）
+  // 一鍵處理管線（修剪 → 卡爾曼 → 加權平均）
   // =========================================================
 
   /// 便捷方法：丟新量測、入緩衝並回傳管線後的**最新平滑值**

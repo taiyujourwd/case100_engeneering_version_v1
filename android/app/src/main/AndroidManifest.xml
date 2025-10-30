@@ -17,9 +17,11 @@
 
     <!-- 前景服務權限 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!--  先不要宣告 dataSync / location，除非真的需要 -->
+    <!-- <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />-->
+    <!-- <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" /> -->
 
     <!-- ✅ 開機自啟動 -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -47,10 +49,20 @@
         <!-- 前景服務 -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:permission="android.permission.FOREGROUND_SERVICE"
-            android:stopWithTask="false"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice|dataSync" />
+            android:foregroundServiceType="connectedDevice">
+            <intent-filter>
+                <action android:name="android.intent.action.RUN" />
+            </intent-filter>
+        </service>
+
+<!--         若真的需要長時間資料同步才加： -->
+<!--        <service-->
+<!--            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"-->
+<!--            android:permission="android.permission.FOREGROUND_SERVICE"-->
+<!--            android:stopWithTask="false"-->
+<!--            android:exported="false"-->
+<!--            android:foregroundServiceType="connectedDevice|dataSync|location" />-->
 
         <!-- 這個是 flutter_foreground_task 需要的 NotificationReceiver -->
         <receiver

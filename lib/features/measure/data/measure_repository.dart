@@ -230,7 +230,7 @@ class MeasureRepository {
     return dayKeys;
   }
 
-  // ✅ 新增：清理無效時間戳的數據
+  // ✅ 清理無效時間戳的數據
   Future<int> cleanInvalidTimestamps() async {
     debugPrint('🧹 [Isar] 開始清理無效時間戳數據...');
 
