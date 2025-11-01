@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class SmoothingResult {
-  final int method; // 1 for Smooth 1, 2 for Smooth 2, 3 for Smooth 3
+  final int method; // 0 for none, 1 for Smooth 1, 2 for Smooth 2, 3 for Smooth 3
   final int? smooth1Order;
   final int? smooth2Order;
   final double? smooth2Error;
@@ -49,7 +49,7 @@ class SmoothingDialog extends StatefulWidget {
 }
 
 class _SmoothingDialogState extends State<SmoothingDialog> {
-  int _selectedMethod = 4; // 1: Smooth 1, 2: Smooth 2, 3: Smooth 3, 4: None
+  int _selectedMethod = 0; // 0: None, 1: Smooth 1, 2: Smooth 2, 3: Smooth 3
 
   // Smooth 1 參數
   final TextEditingController _smooth1OrderController = TextEditingController(text: '6');
@@ -134,15 +134,15 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
         );
       }
     } else if (_selectedMethod == 3) {
-      print('test123 smooth3_trim_n: ${_s3TrimNCtl.text}');
-      print('test123 smooth3_trim_n: ${_s3TrimCCtl.text}');
-      print('test123 smooth3_trim_n: ${_s3TrimDeltaCtl.text}');
-      print('test123 smooth3_trim_n: ${_s3UseTrimmedWindow}');
-      print('test123 smooth3_trim_n: ${_s3KalmanNCtl.text}');
-      print('test123 smooth3_trim_n: ${_s3KnCtl.text}');
-      print('test123 smooth3_trim_n: ${_s3WeightNCtl.text}');
-      print('test123 smooth3_trim_n: ${_s3PCtl.text}');
-      print('test123 smooth3_trim_n: ${_s3KeepHeadOriginal}');
+      // print('test123 smooth3_trim_n: ${_s3TrimNCtl.text}');
+      // print('test123 smooth3_trim_n: ${_s3TrimCCtl.text}');
+      // print('test123 smooth3_trim_n: ${_s3TrimDeltaCtl.text}');
+      // print('test123 smooth3_trim_n: ${_s3UseTrimmedWindow}');
+      // print('test123 smooth3_trim_n: ${_s3KalmanNCtl.text}');
+      // print('test123 smooth3_trim_n: ${_s3KnCtl.text}');
+      // print('test123 smooth3_trim_n: ${_s3WeightNCtl.text}');
+      // print('test123 smooth3_trim_n: ${_s3PCtl.text}');
+      // print('test123 smooth3_trim_n: ${_s3KeepHeadOriginal}');
 
       await prefs.setInt('smooth3_trim_n', int.tryParse(_s3TrimNCtl.text) ?? 20);
       await prefs.setDouble('smooth3_trim_c', double.tryParse(_s3TrimCCtl.text) ?? 20.0);
@@ -172,6 +172,30 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
           ),
         );
       }
+    } else {
+      // Smooth 1
+      await prefs.remove('smooth1_order');
+
+      // Smooth 2
+      await prefs.remove('smooth2_order');
+      await prefs.remove('smooth2_error');
+
+      // Smooth 3
+      await prefs.remove('smooth3_trim_n');
+      await prefs.remove('smooth3_trim_c');
+      await prefs.remove('smooth3_trim_delta');
+      await prefs.remove('smooth3_use_trimmed_window');
+      await prefs.remove('smooth3_kalman_n');
+      await prefs.remove('smooth3_kn');
+      await prefs.remove('smooth3_weight_n');
+      await prefs.remove('smooth3_p');
+      await prefs.remove('smooth3_keep_head_original');
+
+      Navigator.of(context).pop(
+        SmoothingResult(
+          method: 0,
+        ),
+      );
     }
   }
 
@@ -221,6 +245,10 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
                 icon: Icon(Icons.arrow_drop_down, color: Colors.grey.shade700),
                 items: const [
                   DropdownMenuItem(
+                    value: 0,
+                    child: Text('None'),
+                  ),
+                  DropdownMenuItem(
                     value: 1,
                     child: Text('Smooth 1'),
                   ),
@@ -231,10 +259,6 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
                   DropdownMenuItem(
                     value: 3,
                     child: Text('Smooth 3'),
-                  ),
-                  DropdownMenuItem(
-                    value: 4,
-                    child: Text('None'),
                   ),
                 ],
                 onChanged: (value) {

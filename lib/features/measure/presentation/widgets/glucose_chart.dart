@@ -126,7 +126,7 @@ class LineDataConfig {
 /// - 縮放至最小：6分鐘窗口（每格1分鐘）
 /// - 縮放至最大：24小時（每格4小時）
 /// - **兩指橫向縮放控制時間軸，縱向縮放控制數值軸**
-/// - **單指平移查看歷史數據**
+/// - **單指平移查看歷史數據 - 使用真正的平移效果，不重繪曲線**
 class GlucoseChart extends ConsumerStatefulWidget {
   final String dayKey;
   final List<Sample> samples;
@@ -210,7 +210,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
   List<FlSpot> _rawCurrentSpots = [];
   final Map<String, List<FlSpot>> _rawSpotsMap = {};
 
-  // === 快取（整天） ===
+  // === 快取（整天）===
   List<FlSpot> _cachedMainGlucose = [];
   final Map<String, List<FlSpot>> _cachedAddGlucose = {};
   int _cachedMainCount = 0;
@@ -228,19 +228,6 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
   Timer? _elapsedTicker;
   int _elapsedSec = 0;
   DateTime? _lastSampleTime;
-
-  _Range _autoRangeForCurrentWindow() {
-    final List<double> y = [];
-    y.addAll(_inWindow(_cachedMainGlucose).map((e) => e.y));
-    if (widget.additionalLines != null) {
-      for (final entry in widget.additionalLines!) {
-        final cached = _cachedAddGlucose[entry.id] ?? const <FlSpot>[];
-        y.addAll(_inWindow(cached).map((e) => e.y));
-      }
-    }
-    if (y.isEmpty) return const _Range(0, 400);
-    return _calcRange(y, targetTicks: 12);
-  }
 
   void _startElapsedTicker() {
     _elapsedTicker?.cancel();
@@ -817,21 +804,6 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
     return result;
   }
 
-  List<FlSpot> _inWindow(List<FlSpot> all) {
-    if (all.isEmpty) return const [];
-    final double s = _tStartMs, e = _tEndMs;
-    final out = <FlSpot>[];
-    FlSpot? left, right;
-    for (final p in all) {
-      if (p.x < s) left = p;
-      else if (p.x > e) { right ??= p; }
-      if (p.x >= s && p.x <= e) out.add(p);
-    }
-    if (left != null) out.insert(0, left);
-    if (right != null) out.add(right);
-    return out;
-  }
-
   (double, double) _computeCurrentYRangeForZoom() {
     if (_yManual && _yMinManual != null && _yMaxManual != null) {
       return (_yMinManual!, _yMaxManual!);
@@ -917,6 +889,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
     return (glucose - i) / s;
   }
 
+  // ✅ 關鍵改進：使用完整數據集構建線段，讓 clipData 處理裁剪
   List<LineChartBarData> _buildContinuousSegments(List<FlSpot> spots, Color color) {
     if (spots.length < 2) return [];
 
@@ -927,9 +900,8 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
     for (int i = 0; i < spots.length; i++) {
       final spot = spots[i];
 
-      if (spot.x >= _tStartMs && spot.x <= _tEndMs) {
-        currentSegment.add(spot);
-      }
+      // ✅ 不再過濾窗口範圍，保留所有點
+      currentSegment.add(spot);
 
       bool shouldBreak = false;
       if (i < spots.length - 1) {
@@ -957,6 +929,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
     return segments;
   }
 
+  // ✅ 關鍵改進：使用完整數據集構建虛線
   List<LineChartBarData> _buildGapSegments(List<FlSpot> spots, Color color) {
     if (spots.length < 2) return [];
 
@@ -969,22 +942,18 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
       final timeDiff = curr.x - prev.x;
 
       if (timeDiff >= gapThresholdMs) {
-        final prevInWindow = prev.x >= _tStartMs && prev.x <= _tEndMs;
-        final currInWindow = curr.x >= _tStartMs && curr.x <= _tEndMs;
-
-        if (prevInWindow || currInWindow) {
-          gapSegments.add(
-            LineChartBarData(
-              spots: [prev, curr],
-              isCurved: false,
-              barWidth: 1.5,
-              color: color.withOpacity(0.5),
-              dotData: const FlDotData(show: false),
-              belowBarData: BarAreaData(show: false),
-              dashArray: [5, 5],
-            ),
-          );
-        }
+        // ✅ 不再檢查窗口範圍，保留所有間隙線段
+        gapSegments.add(
+          LineChartBarData(
+            spots: [prev, curr],
+            isCurved: false,
+            barWidth: 1.5,
+            color: color.withOpacity(0.5),
+            dotData: const FlDotData(show: false),
+            belowBarData: BarAreaData(show: false),
+            dashArray: [5, 5],
+          ),
+        );
       }
     }
 
@@ -1098,13 +1067,14 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
         : currentA.toStringAsFixed(6))
         : '--';
 
-    final glucoseFromCurrentWin = _inWindow(_cachedMainGlucose);
+    // ✅ 使用完整的緩存數據，不再過濾窗口
+    final glucoseFromCurrentWin = _cachedMainGlucose;
 
     final List<List<FlSpot>> additionalGlucoseSpots = [];
     if (widget.additionalLines != null) {
       for (final config in widget.additionalLines!) {
         final cached = _cachedAddGlucose[config.id] ?? const <FlSpot>[];
-        additionalGlucoseSpots.add(_inWindow(cached));
+        additionalGlucoseSpots.add(cached);  // ✅ 使用完整數據
       }
     }
 
@@ -1164,6 +1134,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
     );
     allLineBars.add(invisibleBaseline);
 
+    // ✅ 使用完整數據集構建線段
     if (glucoseFromCurrentWin.length >= 2) {
       allLineBars.addAll(_buildContinuousSegments(glucoseFromCurrentWin, Colors.blue));
       allLineBars.addAll(_buildGapSegments(glucoseFromCurrentWin, Colors.blue));
@@ -1228,7 +1199,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
                   // 最新點使用光暈閃爍效果
                   return GlowingDotPainter(
                     radius: 5,
-                    color: Colors.red,
+                    color: Colors.deepPurpleAccent,
                     glowOpacity: _blinkAnimation.value,
                     strokeWidth: 1.5,
                     strokeColor: Colors.white,
@@ -1340,6 +1311,7 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
                           maxX: maxX,
                           minY: gluRange.min,
                           maxY: gluRange.max,
+                          // ✅ 關鍵：啟用裁剪，讓窗口外的內容被隱藏
                           clipData: const FlClipData(left: true, top: true, right: true, bottom: true),
                           lineBarsData: allLineBars,
                           gridData: FlGridData(
@@ -1510,7 +1482,8 @@ class _GlucoseChartState extends ConsumerState<GlucoseChart> with SingleTickerPr
                                   FlSpot? closestRawSpot;
                                   double minDistance = double.infinity;
                                   for (final raw in rawSpots) {
-                                    if (raw.x >= _tStartMs && raw.x < _tEndMs) {
+                                    // ✅ 只在可視窗口內查找最近點
+                                    if (raw.x >= _tStartMs && raw.x <= _tEndMs) {
                                       final d = (raw.x - hitX).abs();
                                       if (d < minDistance) {
                                         minDistance = d;

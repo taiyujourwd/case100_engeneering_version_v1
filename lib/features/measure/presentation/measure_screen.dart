@@ -389,8 +389,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
 
     // 1) 依結果立刻更新本地狀態 → 直接觸發圖形重建
     setState(() {
-      // 對話框的 4 = None；在畫面狀態用 0 表示不套用
-      smoothMethod = (result.method == 4) ? 0 : result.method;
+      // 對話框的 0 = None；在畫面狀態用 0 表示不套用
+      smoothMethod = (result.method == 0) ? 0 : result.method;
 
       if (result.method == 1 && result.smooth1Order != null) {
         smooth1Order = result.smooth1Order!;
@@ -398,20 +398,23 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
         if (result.smooth2Order != null) smooth2Order = result.smooth2Order!;
         if (result.smooth2Error != null) smooth2Error = result.smooth2Error!;
       } else if (result.method == 3) {
-        if (result.smooth3TrimN != null)          smooth3TrimN = result.smooth3TrimN!;
-        if (result.smooth3TrimC != null)          smooth3TrimC = result.smooth3TrimC!;
-        if (result.smooth3TrimDelta != null)      smooth3TrimDelta = result.smooth3TrimDelta!;
+        if (result.smooth3TrimN != null) smooth3TrimN = result.smooth3TrimN!;
+        if (result.smooth3TrimC != null) smooth3TrimC = result.smooth3TrimC!;
+        if (result.smooth3TrimDelta != null) smooth3TrimDelta = result.smooth3TrimDelta!;
         if (result.smooth3UseTrimmedWindow != null) smooth3UseTrimmedWindow = result.smooth3UseTrimmedWindow!;
-        if (result.smooth3KalmanN != null)        smooth3KalmanN = result.smooth3KalmanN!;
-        if (result.smooth3Kn != null)             smooth3Kn = result.smooth3Kn!;
-        if (result.smooth3WeightN != null)        smooth3WeightN = result.smooth3WeightN!;
-        if (result.smooth3P != null)              smooth3P = result.smooth3P!;
+        if (result.smooth3KalmanN != null) smooth3KalmanN = result.smooth3KalmanN!;
+        if (result.smooth3Kn != null) smooth3Kn = result.smooth3Kn!;
+        if (result.smooth3WeightN != null) smooth3WeightN = result.smooth3WeightN!;
+        if (result.smooth3P != null) smooth3P = result.smooth3P!;
         if (result.smooth3KeepHeadOriginal != null) smooth3KeepHeadOriginal = result.smooth3KeepHeadOriginal!;
       }
     });
 
     // 2) 提示
     switch (result.method) {
+      case 0:
+        _toast('已關閉平滑');
+        break;
       case 1:
         _toast('已套用 Smooth 1：Order=${smooth1Order}');
         break;
@@ -420,9 +423,6 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
         break;
       case 3:
         _toast('已套用 Smooth 3');
-        break;
-      case 4:
-        _toast('已關閉平滑');
         break;
     }
   }
@@ -1711,8 +1711,8 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
 
 
                       // 測試用，產生假資料
-                      list.clear();
-                      list = mockSamples; // 自動產生的虛擬資料
+                      // list.clear();
+                      // list = mockSamples; // 自動產生的虛擬資料
                       // list = sampleRealData; // 實際量測資料
 
                       // 依 method 動態產生平滑樣本
@@ -1764,7 +1764,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
                             color: Colors.orange,
                             samples: smooth2Samples,
                             slope: params.slope,
-                            intercept: params.intercept + 100.0,
+                            intercept: params.intercept,
                           );
                         } else if (smoothMethod == 3) {
                           return LineDataConfig(
@@ -1773,7 +1773,7 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
                             color: Colors.purple,
                             samples: smooth3Samples,
                             slope: params.slope,
-                            intercept: params.intercept + 100.0,  // ← 加上 100 mg/dL 的偏移
+                            intercept: params.intercept,  // ← 加上 100 mg/dL 的偏移
                           );
                         }
                         return null;
