@@ -174,9 +174,10 @@ DateTime? decodeBitfieldTime4(
 class BleService {
   final _ble = FlutterReactiveBle();
 
-  // 依你的韌體協議替換正確的 UUID
-  static final wrUuid = Uuid.parse("5a87b4ef-3bfa-76a8-e642-92933c31434f");
-  static final rdFwUuid = Uuid.parse("6e6c31cc-3bd6-fe13-124d-9611451cd8f4");
+  // === 連線模式用特徵值 ===
+  final wrUuid        = Uuid.parse("5a87b4ef-3bfa-76a8-e642-92933c31434f"); // Write
+  final rdMeUuid      = Uuid.parse("6e6c31cc-3bd6-fe13-124d-9611451cd8f3"); // Current Raw Data
+  final rdFwUuid      = Uuid.parse("6e6c31cc-3bd6-fe13-124d-9611451cd8f4"); // Firmware Version
 
   StreamSubscription<DiscoveredDevice>? _scanSub;
   StreamSubscription<ConnectionStateUpdate>? _connSub;
@@ -396,53 +397,54 @@ class BleService {
         .connectToDevice(
       id: deviceId,
       connectionTimeout: const Duration(seconds: 30),
-    )
-        .listen(
+    ).listen(
           (update) async {
         debugPrint('🔄 連線狀態：${update.connectionState}');
 
         if (update.connectionState == DeviceConnectionState.connected) {
           _connectedDeviceId = deviceId;
-
           try {
             await _withGattLock(() async {
+              // (可選) 調高連線優先權
               try {
                 await _ble.requestConnectionPriority(
                   deviceId: deviceId,
                   priority: ConnectionPriority.highPerformance,
                 );
-                await Future.delayed(const Duration(milliseconds: 200));
+                await Future.delayed(const Duration(milliseconds: 150));
               } catch (e) {
                 debugPrint('⚠️ 升級連線優先權失敗：$e');
               }
 
+              // ✅ 一次找齊必要特徵；找不到就跳出
               final chars = await _findCharacteristics(deviceId);
               if (chars == null) {
-                debugPrint('❌ 找不到必要特徵');
+                debugPrint('❌ 找不到必要特徵，略過初始化');
                 return;
               }
 
-              await Future.delayed(const Duration(milliseconds: 120));
-
+              // 寫入時間
               final ok = await _writeDeviceTime(deviceId, chars.wr);
               _timeWritten[deviceId] = ok;
               debugPrint(ok ? '✅ 時間寫入成功' : '❌ 時間寫入失敗');
 
-              await Future.delayed(const Duration(milliseconds: 150));
+              await Future.delayed(const Duration(milliseconds: 120));
 
+              // 讀韌體版本（rdMe2）
               try {
-                final fw = await _readFirmwareVersion(deviceId, chars.rdFw);
+                final fw = await _readFirmwareVersion(deviceId, chars.rdMe2);
                 if (fw != null) {
-                  _saveDeviceVersion(fw);
+                  await _saveDeviceVersion(fw);
                   debugPrint('📦 韌體版本：$fw');
                 }
               } catch (e) {
                 debugPrint('📦 讀取版本失敗：$e');
               }
 
-              await Future.delayed(const Duration(milliseconds: 150));
+              await Future.delayed(const Duration(milliseconds: 120));
 
-              await _subscribeToNotifications(deviceId);
+              // ✅ 直接用已找好的 rdMe 訂閱 raw data
+              await _subscribeToNotificationsWithChar(chars.rdMe);
             });
           } catch (e) {
             debugPrint('❌ 連線模式初始化失敗：$e');
@@ -467,110 +469,61 @@ class BleService {
     );
   }
 
-  Future<void> _subscribeToNotifications(String deviceId) async {
+  Future<void> _subscribeToNotificationsWithChar(QualifiedCharacteristic notifyChar) async {
     try {
-      final services = await _ble.discoverServices(deviceId);
-      QualifiedCharacteristic? notifyCharQ;
-
-      // A) 若已知 Char UUID，直接定位
-      final preferredNotify = _BleFilters.kNotifyCharUuid; // ← 來自你前面存的
-      if (preferredNotify != null) {
-        for (final s in services) {
-          for (final c in s.characteristics) {
-            if (c.characteristicId == preferredNotify) {
-              notifyCharQ = QualifiedCharacteristic(
-                deviceId: deviceId,
-                serviceId: s.serviceId,
-                characteristicId: c.characteristicId,
-              );
-              break;
-            }
-          }
-          if (notifyCharQ != null) break;
-        }
-      }
-
-      // B) 若沒有存，或定位失敗 → 自動找第一個可通知的
-      if (notifyCharQ == null) {
-        for (final s in services) {
-          for (final c in s.characteristics) {
-            if (c.isNotifiable) {
-              notifyCharQ = QualifiedCharacteristic(
-                deviceId: deviceId,
-                serviceId: s.serviceId,
-                characteristicId: c.characteristicId,
-              );
-              // 同步補存（下次可直用）
-              _BleFilters.kNotifyCharUuid = c.characteristicId;
-              await _BleFilters.saveToPrefs();
-              break;
-            }
-          }
-          if (notifyCharQ != null) break;
-        }
-      }
-
-      if (notifyCharQ == null) {
-        debugPrint('⚠️ 找不到可用的通知特徵值');
-        return;
-      }
-
-      _notifySubscription = _ble.subscribeToCharacteristic(notifyCharQ).listen(
+      await _notifySubscription?.cancel();
+      _notifySubscription = _ble.subscribeToCharacteristic(notifyChar).listen(
             (data) {
-          debugPrint('📨 收到連線模式數據：${data.length} bytes');
-          _parseConnectionModeData(deviceId, data);
+          debugPrint('📨 [Notify] 收到 ${data.length} bytes 來自 ${notifyChar.characteristicId}');
+          _parseConnectionModeData(notifyChar.deviceId, data);
         },
-        onError: (e) {
-          debugPrint('❌ 訂閱通知失敗：$e');
-        },
+        onError: (e) => debugPrint('❌ 通知訂閱失敗：$e'),
       );
-
-      debugPrint('✅ 已訂閱通知特徵值：${notifyCharQ.characteristicId}');
+      debugPrint('✅ 已訂閱通知 Char：${notifyChar.characteristicId}');
     } catch (e) {
-      debugPrint('❌ 訂閱通知過程失敗：$e');
+      debugPrint('❌ 訂閱過程失敗：$e');
     }
   }
 
   void _parseConnectionModeData(String deviceId, List<int> data) {
     if (data.isEmpty) return;
 
-    debugPrint('🔍 解析連線數據：${_hex(data)}');
+    debugPrint('🔍 [連線模式] 解析 RawData (${data.length} bytes): ${_hex(data)}');
 
+    // 取得時間戳
     DateTime? timestamp;
+    if (data.length >= 4) {
+      final guess = guessBitfieldTime(data, asUtc: false);
+      if (guess != null) timestamp = guess.time;
+    }
+
+    // --- 核心電流解析邏輯 ---
     double? voltage;
     double? temperature;
     final rawCurrents = <double>[];
 
-    if (data.length >= 4) {
-      final guess = guessBitfieldTime(data, asUtc: false);
-      if (guess != null) {
-        timestamp = guess.time;
-        debugPrint('⏱️ 連線模式時間：$timestamp');
+    try {
+      if (data.length >= 10) {
+        // 同步讀取各段位元組
+        final batHi = data[2], batLo = data[3];
+        final voltHi = data[4], voltLo = data[5];
+
+        voltage = ((voltHi << 8) | voltLo) / 1000.0;
+        temperature = ((batHi << 8) | batLo) / 100.0;
+
+        // 電流換算公式（與 broadcast 模式一致）
+        final current = calculateCurrentFromMfr(data, 4);
+        rawCurrents.add(current);
+
+        debugPrint('⚡ Raw Current(A)=${current.toStringAsExponential(6)}');
+        debugPrint('🌡️ Temp=${temperature?.toStringAsFixed(2)} °C');
+        debugPrint('🔋 Volt=${voltage?.toStringAsFixed(3)} V');
       }
+    } catch (e) {
+      debugPrint('❌ RawData 解析失敗: $e');
     }
 
-    if (data.length >= 6) {
-      final rawCurrent = (data[4] << 8) | data[5];
-      final current_mA = rawCurrent / 10.0;
-      rawCurrents.add(current_mA);
-      debugPrint('⚡ 電流：${current_mA} mA');
-    }
-
-    if (data.length >= 8) {
-      final rawTemp = (data[6] << 8) | data[7];
-      temperature = rawTemp / 100.0;
-      debugPrint('🌡️ 溫度：${temperature} °C');
-    }
-
-    if (data.length >= 10) {
-      final rawVolt = (data[8] << 8) | data[9];
-      voltage = rawVolt / 1000.0;
-      debugPrint('🔋 電壓：${voltage} V');
-    }
-
-    final current = calculateCurrent(rawCurrents);
-    final currents = [current];
-
+    // 組合封包物件
     final bleData = BleDeviceData(
       id: deviceId,
       name: _connectedDeviceName ?? deviceId.substring(0, 8),
@@ -578,7 +531,7 @@ class BleService {
       timestamp: timestamp ?? DateTime.now(),
       voltage: voltage,
       temperature: temperature,
-      currents: currents,
+      currents: rawCurrents,
       rawData: data,
     );
 
@@ -606,8 +559,7 @@ class BleService {
         .connectToDevice(
       id: deviceId,
       connectionTimeout: const Duration(seconds: 15),
-    )
-        .listen((update) async {
+    ).listen((update) async {
       debugPrint('🔄 連線狀態：${update.connectionState}');
 
       if (update.connectionState == DeviceConnectionState.connected) {
@@ -638,7 +590,7 @@ class BleService {
             await Future.delayed(const Duration(milliseconds: 150));
 
             try {
-              final fw = await _readFirmwareVersion(deviceId, chars.rdFw);
+              final fw = await _readFirmwareVersion(deviceId, chars.rdMe2);
               if (fw != null) {
                 _saveDeviceVersion(fw);
                 debugPrint('📦 韌體版本：$fw');
@@ -744,31 +696,48 @@ class BleService {
     }
   }
 
-  Future<({QualifiedCharacteristic wr, QualifiedCharacteristic rdFw})?>
-  _findCharacteristics(String deviceId) async {
+  Future<({
+  QualifiedCharacteristic wr,
+  QualifiedCharacteristic rdMe,
+  QualifiedCharacteristic rdMe2,
+  })?> _findCharacteristics(String deviceId) async {
+    // 建議保留一點延遲，避免 discoverServices 時序太快
+    await Future.delayed(const Duration(milliseconds: 200));
+
     final services = await _ble.discoverServices(deviceId);
-    QualifiedCharacteristic? wr, rdFw;
+
+    // 除錯：完整列出 GATT
+    debugPrint('📡 發現 ${services.length} 個 Service：');
+    for (final s in services) {
+      debugPrint('  • Service: ${s.serviceId}');
+      for (final c in s.characteristics) {
+        debugPrint('     ↳ Char: ${c.characteristicId}'
+            ' (R:${c.isReadable} W:${c.isWritableWithResponse||c.isWritableWithoutResponse} N:${c.isNotifiable})');
+      }
+    }
+
+    QualifiedCharacteristic? wr, rdMe, rdMe2;
 
     for (final s in services) {
       for (final c in s.characteristics) {
+        // 直接用 UUID 物件比對，避免大小寫字串差異
         if (c.characteristicId == wrUuid) {
-          wr = QualifiedCharacteristic(
-            deviceId: deviceId,
-            serviceId: s.serviceId,
-            characteristicId: c.characteristicId,
-          );
+          wr = QualifiedCharacteristic(deviceId: deviceId, serviceId: s.serviceId, characteristicId: c.characteristicId);
+        } else if (c.characteristicId == rdMeUuid) {
+          rdMe = QualifiedCharacteristic(deviceId: deviceId, serviceId: s.serviceId, characteristicId: c.characteristicId);
         } else if (c.characteristicId == rdFwUuid) {
-          rdFw = QualifiedCharacteristic(
-            deviceId: deviceId,
-            serviceId: s.serviceId,
-            characteristicId: c.characteristicId,
-          );
+          rdMe2 = QualifiedCharacteristic(deviceId: deviceId, serviceId: s.serviceId, characteristicId: c.characteristicId);
         }
       }
     }
 
-    if (wr == null || rdFw == null) return null;
-    return (wr: wr, rdFw: rdFw);
+    if (wr == null || rdMe == null || rdMe2 == null) {
+      debugPrint('⚠️ 未找齊必要特徵：wr=$wr, rdMe=$rdMe, rdMe2=$rdMe2');
+      return null;
+    }
+
+    debugPrint('✅ 找到必要特徵：wr=${wr.characteristicId}, rdMe=${rdMe.characteristicId}, rdMe2=${rdMe2.characteristicId}');
+    return (wr: wr, rdMe: rdMe, rdMe2: rdMe2);
   }
 
   Future<bool> _writeDeviceTime(

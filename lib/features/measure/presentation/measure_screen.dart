@@ -6,6 +6,7 @@ import 'package:case100_engeneering_version_v1/features/measure/presentation/pro
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/data_smoother.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/settings_dialog.dart';
 import 'package:case100_engeneering_version_v1/features/measure/presentation/widgets/smoothing_settings_dialog.dart';
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +17,8 @@ import '../../../common/utils/date_key.dart';
 import '../ble/ble_connection_mode.dart';
 import '../data/isar_schemas.dart';
 import '../data/measure_repository.dart';
+import '../data/sample_data.dart';
+import '../data/sample_real_data.dart';
 import '../foreground/foreground_ble_service.dart';
 import '../screens/qu_scan_screen.dart';
 import '../models/ble_device.dart';  // ✅ 加入
@@ -46,17 +49,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
   double smooth2Error = 3.0;     // Smooth2 的允許誤差（自定義語意）
 
   // Smooth 3
-  int smooth3TrimN = 20;
+  int smooth3TrimN = 3;
   double smooth3TrimC = 20.0;
   double smooth3TrimDelta = 0.8;
-  bool smooth3UseTrimmedWindow = true;
+  bool smooth3UseTrimmedWindow = false;
 
-  int smooth3KalmanN = 10;
+  int smooth3KalmanN = 3;
   double smooth3Kn = 0.2;
 
-  int smooth3WeightN = 10;
+  int smooth3WeightN = 3;
   double smooth3P = 3.0;
-  bool smooth3KeepHeadOriginal = true;
+  bool smooth3KeepHeadOriginal = false;
 
   // ✅ 主線程 BLE 訂閱（iOS 必須，Android 備援）
   StreamSubscription<BleDeviceData>? _mainThreadBleSubscription;
@@ -382,21 +385,45 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
 
   void _showSmoothingDialog() async {
     final result = await showSmoothingDialog(context);
+    if (result == null) return;
 
-    if (result != null) {
-      if (result.method == 1) {
-        _toast('已套用 Smooth 1：Order=${result.smooth1Order}');
-      } else {
-        _toast('已套用 Smooth 2：Error=${result.smooth2Error}%、Order=${result.smooth2Order}');
+    // 1) 依結果立刻更新本地狀態 → 直接觸發圖形重建
+    setState(() {
+      // 對話框的 4 = None；在畫面狀態用 0 表示不套用
+      smoothMethod = (result.method == 4) ? 0 : result.method;
+
+      if (result.method == 1 && result.smooth1Order != null) {
+        smooth1Order = result.smooth1Order!;
+      } else if (result.method == 2) {
+        if (result.smooth2Order != null) smooth2Order = result.smooth2Order!;
+        if (result.smooth2Error != null) smooth2Error = result.smooth2Error!;
+      } else if (result.method == 3) {
+        if (result.smooth3TrimN != null)          smooth3TrimN = result.smooth3TrimN!;
+        if (result.smooth3TrimC != null)          smooth3TrimC = result.smooth3TrimC!;
+        if (result.smooth3TrimDelta != null)      smooth3TrimDelta = result.smooth3TrimDelta!;
+        if (result.smooth3UseTrimmedWindow != null) smooth3UseTrimmedWindow = result.smooth3UseTrimmedWindow!;
+        if (result.smooth3KalmanN != null)        smooth3KalmanN = result.smooth3KalmanN!;
+        if (result.smooth3Kn != null)             smooth3Kn = result.smooth3Kn!;
+        if (result.smooth3WeightN != null)        smooth3WeightN = result.smooth3WeightN!;
+        if (result.smooth3P != null)              smooth3P = result.smooth3P!;
+        if (result.smooth3KeepHeadOriginal != null) smooth3KeepHeadOriginal = result.smooth3KeepHeadOriginal!;
       }
+    });
 
-      // ✅ 重新載入設定
-      await _loadSmoothingPrefs();
-
-      // ✅ 強制重建
-      if (mounted) {
-        setState(() {});
-      }
+    // 2) 提示
+    switch (result.method) {
+      case 1:
+        _toast('已套用 Smooth 1：Order=${smooth1Order}');
+        break;
+      case 2:
+        _toast('已套用 Smooth 2：Error=${smooth2Error}%、Order=${smooth2Order}');
+        break;
+      case 3:
+        _toast('已套用 Smooth 3');
+        break;
+      case 4:
+        _toast('已關閉平滑');
+        break;
     }
   }
 
@@ -1339,23 +1366,59 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
   }
 
   // ---- 用 DataSmoother 生成平滑樣本 ----
-
   List<Sample> buildSmooth1Samples(List<Sample> raw, int order) {
     if (raw.isEmpty) return const [];
-
-    // 以時間排序，確保移動窗正確（若 repo 已保證排序可省略）
     final src = [...raw]..sort((a, b) => a.ts.compareTo(b.ts));
-
     final smoother = DataSmoother();
     final out = <Sample>[];
 
-    for (final s in src) {
-      final v = s.current; // 電流欄位
-      smoother.addData(v!);
+    double totalDiff = 0;
+    int changedCount = 0;
 
-      final sm = smoother.smooth1(order) ?? v; // 前幾筆不足時用原值保底
-      out.add(s.copyWith(current: sm));
+    for (int i = 0; i < src.length; i++) {
+      final s = src[i];
+
+      final currents = s.currents;
+      if (currents == null || currents.isEmpty) {
+        out.add(s);
+        continue;
+      }
+
+      final v = currents.first.toDouble();
+      smoother.addData(v);
+
+      final sm = smoother.smooth1(order) ?? v;
+      final diff = (sm - v).abs();
+
+      if (diff > 1e-15) {
+        changedCount++;
+        totalDiff += diff;
+
+        if (changedCount <= 10) {
+          debugPrint('📊 [Smooth1] 第${i+1}筆: '
+              '原始=${v.toStringAsExponential(6)}, '
+              '平滑=${sm.toStringAsExponential(6)}, '
+              '差值=${diff.toStringAsExponential(6)}, '
+              '变化率=${(diff/v.abs()*100).toStringAsFixed(2)}%');
+        }
+      }
+
+      // 🔧 关键修正：把平滑值存入 currents 列表
+      out.add(s.copyWith(
+        current: sm,              // 也更新 current 以保持一致
+        currents: [sm],           // ✅ 把平滑值存入 currents 列表
+      ));
     }
+
+    if (changedCount > 0) {
+      debugPrint('📈 [Smooth1] 總計: ${src.length}筆, '
+          '有${changedCount}筆被平滑 '
+          '(${(changedCount/src.length*100).toStringAsFixed(1)}%), '
+          '平均差值=${(totalDiff/changedCount).toStringAsExponential(6)}');
+    } else {
+      debugPrint('⚠️ [Smooth1] 没有任何数据被平滑！');
+    }
+
     return out;
   }
 
@@ -1363,16 +1426,26 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
     if (raw.isEmpty) return const [];
 
     final src = [...raw]..sort((a, b) => a.ts.compareTo(b.ts));
-
     final smoother = DataSmoother();
     final out = <Sample>[];
 
     for (final s in src) {
-      final v = s.current; // 電流欄位
-      smoother.addData(v!);
+      final currents = s.currents;
+      if (currents == null || currents.isEmpty) {
+        out.add(s);
+        continue;
+      }
+
+      final v = currents.first.toDouble();
+      smoother.addData(v);
 
       final sm = smoother.smooth2(order, errorPercent) ?? v;
-      out.add(s.copyWith(current: sm));
+
+      // ✅ 存入 currents 列表
+      out.add(s.copyWith(
+        current: sm,
+        currents: [sm],
+      ));
     }
     return out;
   }
@@ -1394,8 +1467,17 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
     final smoother = DataSmoother();
     final out = <Sample>[];
 
+    int changedCount = 0;
+    int totalCount = 0;
+
     for (final s in src) {
-      final v = s.current!;
+      final currents = s.currents;
+      if (currents == null || currents.isEmpty) {
+        out.add(s);
+        continue;
+      }
+
+      final v = currents.first.toDouble();
       smoother.addData(v);
 
       final sm = smoother.smooth3(
@@ -1410,8 +1492,23 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
         keepHeadOriginal: keepHeadOriginal,
       ) ?? v;
 
-      out.add(s.copyWith(current: sm));
+      totalCount++;
+      if ((sm - v).abs() > 1e-10) {
+        changedCount++;
+        if (changedCount <= 5) {
+          debugPrint('🔍 [Smooth3] 第 $totalCount 筆: 原始=$v, 平滑=$sm, 差值=${sm - v}');
+        }
+      }
+
+      // ✅ 存入 currents 列表
+      out.add(s.copyWith(
+        current: sm,
+        currents: [sm],
+      ));
     }
+
+    debugPrint('📊 [Smooth3] 總共 $totalCount 筆，有 $changedCount 筆被平滑 (${(changedCount / totalCount * 100).toStringAsFixed(1)}%)');
+
     return out;
   }
 
@@ -1609,13 +1706,28 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
                         debugPrint('   堆棧: ${snap.stackTrace}');
                       }
 
-                      final list = snap.data ?? const [];
+                      List<Sample> list = snap.data ?? const [];
                       debugPrint('   數據筆數: ${list.length}');
+
+
+                      // 測試用，產生假資料
+                      list.clear();
+                      list = mockSamples; // 自動產生的虛擬資料
+                      // list = sampleRealData; // 實際量測資料
 
                       // 依 method 動態產生平滑樣本
                       final smooth1Samples = (smoothMethod == 1)
                           ? buildSmooth1Samples(list, smooth1Order)
                           : const <Sample>[];
+
+                      // 測試用
+                      // for (final s in list) {
+                      //   print('test123 list: ts=${s.ts}, current=${s.current}, currents=${s.currents}');
+                      // }
+                      //
+                      // for (final s in smooth1Samples) {
+                      //   print('test123 smooth1Samples: ts=${s.ts}, current=${s.current}, currents=${s.currents}');
+                      // }
 
                       final smooth2Samples = (smoothMethod == 2)
                           ? buildSmooth2Samples(list, smooth2Order, smooth2Error)
@@ -1648,20 +1760,20 @@ class _MeasureScreenState extends ConsumerState<MeasureScreen>
                         } else if (smoothMethod == 2) {
                           return LineDataConfig(
                             id: 'smooth2',
-                            label: 'Smooth 2',
+                            label: 'Smooth 2 (+100)',
                             color: Colors.orange,
                             samples: smooth2Samples,
                             slope: params.slope,
-                            intercept: params.intercept,
+                            intercept: params.intercept + 100.0,
                           );
                         } else if (smoothMethod == 3) {
                           return LineDataConfig(
                             id: 'smooth3',
-                            label: 'Smooth 3',
+                            label: 'Smooth 3 (+100)',  // ← 修改標籤，顯示有偏移
                             color: Colors.purple,
                             samples: smooth3Samples,
                             slope: params.slope,
-                            intercept: params.intercept,
+                            intercept: params.intercept + 100.0,  // ← 加上 100 mg/dL 的偏移
                           );
                         }
                         return null;

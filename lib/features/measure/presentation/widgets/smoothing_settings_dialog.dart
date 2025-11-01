@@ -49,7 +49,7 @@ class SmoothingDialog extends StatefulWidget {
 }
 
 class _SmoothingDialogState extends State<SmoothingDialog> {
-  int _selectedMethod = 1; // 1: Smooth 1, 2: Smooth 2
+  int _selectedMethod = 4; // 1: Smooth 1, 2: Smooth 2, 3: Smooth 3, 4: None
 
   // Smooth 1 參數
   final TextEditingController _smooth1OrderController = TextEditingController(text: '6');
@@ -134,6 +134,16 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
         );
       }
     } else if (_selectedMethod == 3) {
+      print('test123 smooth3_trim_n: ${_s3TrimNCtl.text}');
+      print('test123 smooth3_trim_n: ${_s3TrimCCtl.text}');
+      print('test123 smooth3_trim_n: ${_s3TrimDeltaCtl.text}');
+      print('test123 smooth3_trim_n: ${_s3UseTrimmedWindow}');
+      print('test123 smooth3_trim_n: ${_s3KalmanNCtl.text}');
+      print('test123 smooth3_trim_n: ${_s3KnCtl.text}');
+      print('test123 smooth3_trim_n: ${_s3WeightNCtl.text}');
+      print('test123 smooth3_trim_n: ${_s3PCtl.text}');
+      print('test123 smooth3_trim_n: ${_s3KeepHeadOriginal}');
+
       await prefs.setInt('smooth3_trim_n', int.tryParse(_s3TrimNCtl.text) ?? 20);
       await prefs.setDouble('smooth3_trim_c', double.tryParse(_s3TrimCCtl.text) ?? 20.0);
       await prefs.setDouble('smooth3_trim_delta', double.tryParse(_s3TrimDeltaCtl.text) ?? 0.8);
@@ -221,6 +231,10 @@ class _SmoothingDialogState extends State<SmoothingDialog> {
                   DropdownMenuItem(
                     value: 3,
                     child: Text('Smooth 3'),
+                  ),
+                  DropdownMenuItem(
+                    value: 4,
+                    child: Text('None'),
                   ),
                 ],
                 onChanged: (value) {

@@ -51,27 +51,34 @@ class DataSmoother {
   }
 
   double? smooth1(int order) {
-    if (order < 1 || order > maxBufferSize) {
-      throw ArgumentError('order 必須在 1 到 $maxBufferSize 之間');
-    }
-
-    if (order == 1) {
-      return _dataBuffer.isEmpty ? null : _dataBuffer.last;
+    if (order < 1) {
+      throw ArgumentError('order 至少為 1');
     }
 
     if (_dataBuffer.isEmpty) {
       return null;
     }
 
+    // ⚠️ order == 1 時沒有平滑效果，直接回傳最後一筆
+    if (order == 1) {
+      return _dataBuffer.last;
+    }
+
+    // 取最後 n 筆資料（包含最後一筆本身）
     final n = min(order, _dataBuffer.length);
-    final lastNData = _dataBuffer.sublist(_dataBuffer.length - n);
-    final sum = lastNData.reduce((acc, val) => acc + val);
-    return sum / n;
+    final startIndex = _dataBuffer.length - n;
+    final recentData = _dataBuffer.sublist(startIndex); // 包含最後一筆
+
+    // 計算平均
+    final sum = recentData.reduce((a, b) => a + b);
+    final avg = sum / recentData.length;
+
+    return avg;
   }
 
   double? smooth2(int order, double errorPercent) {
-    if (order < 1 || order > maxBufferSize) {
-      throw ArgumentError('order 必須在 1 到 $maxBufferSize 之間');
+    if (order < 1) {
+      throw ArgumentError('order 至少為 1');
     }
     if (errorPercent < 0.0 || errorPercent > 10.0) {
       throw ArgumentError('errorPercent 必須在 0.0 到 10.0 之間');
@@ -87,6 +94,9 @@ class DataSmoother {
 
     final lastValue = _dataBuffer[_dataBuffer.length - 1];
     final prevValue = _dataBuffer[_dataBuffer.length - 2];
+    if (prevValue == 0.0) {
+      return lastValue; // 返回原值
+    }
     final errorRate = ((lastValue - prevValue).abs() / prevValue.abs()) * 100;
 
     if (errorRate > errorPercent) {
@@ -220,17 +230,21 @@ class DataSmoother {
         required bool useTrimmedWindow,
       }) {
     if (data.length <= 1) return List<double>.from(data);
-    n = n.clamp(1, data.length);
+
+    // ✅ 改為：使用 min(n, 當前長度) 作為窗口
     final out = <double>[];
 
-    // 先原樣放入前 n 筆
-    for (int i = 0; i < n; i++) {
-      out.add(data[i]);
-    }
-    for (int i = n; i < data.length; i++) {
+    for (int i = 0; i < data.length; i++) {
+      if (i == 0) {
+        out.add(data[i]);  // 第一筆保持原值
+        continue;
+      }
+
+      // ✅ 動態窗口大小
+      final windowSize = math.min(n, i);
       final window = useTrimmedWindow
-          ? out.sublist(i - n, i)
-          : data.sublist(i - n, i);
+          ? out.sublist(i - windowSize, i)
+          : data.sublist(i - windowSize, i);
 
       final mean = window.reduce((a, b) => a + b) / window.length;
       final y = data[i];
@@ -268,18 +282,22 @@ class DataSmoother {
         required double Kn,
       }) {
     if (data.length <= 1) return List<double>.from(data);
-    n = n.clamp(2, data.length); // 至少 2
+
     final out = <double>[];
 
-    // 前 n 筆沿用輸入
-    for (int i = 0; i < n; i++) {
-      out.add(data[i]);
-    }
-    for (int i = n; i < data.length; i++) {
-      final window = out.sublist(i - n, i); // 用已濾波視窗較穩
+    for (int i = 0; i < data.length; i++) {
+      if (i < 2) {
+        out.add(data[i]);  // 前 2 筆（回歸最少需要 2 點）
+        continue;
+      }
+
+      // ✅ 動態窗口大小
+      final windowSize = math.min(n, i);
+      final window = out.sublist(i - windowSize, i);
+
       final reg = _linearRegression(window);
       final a = reg['a']!, b = reg['b']!;
-      final xNext = i + 1; // 1-based
+      final xNext = windowSize + 1;
       final yHat = a * xNext + b;
 
       final y = data[i];
@@ -297,33 +315,21 @@ class DataSmoother {
         required bool keepHeadOriginal,
       }) {
     if (data.isEmpty) return const <double>[];
-    n = n.clamp(1, data.length);
+
     final result = <double>[];
 
-    final weights = List<double>.generate(n, (i) => math.pow(i + 1, p).toDouble());
-    final denFull = weights.reduce((a, b) => a + b);
-
     for (int i = 0; i < data.length; i++) {
-      final start = (i - n + 1) < 0 ? 0 : (i - n + 1);
+      // ✅ 動態窗口大小
+      final windowSize = math.min(n, i + 1);
+      final start = i - windowSize + 1;
       final window = data.sublist(start, i + 1);
 
-      if (window.length < n && keepHeadOriginal) {
-        result.add(data[i]);
-        continue;
-      }
-
+      // ✅ 即使窗口不足也計算加權平均（移除 keepHeadOriginal 判斷）
       double num = 0.0, den = 0.0;
-      if (window.length == n) {
-        for (int j = 0; j < n; j++) {
-          num += window[j] * weights[j];
-        }
-        den = denFull;
-      } else {
-        for (int j = 0; j < window.length; j++) {
-          final w = math.pow(j + 1, p).toDouble();
-          num += window[j] * w;
-          den += w;
-        }
+      for (int j = 0; j < window.length; j++) {
+        final w = math.pow(j + 1, p).toDouble();
+        num += window[j] * w;
+        den += w;
       }
       result.add(num / den);
     }

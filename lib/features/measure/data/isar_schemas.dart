@@ -10,13 +10,38 @@ class Sample {
   late int seq;
   late DateTime ts;
   late String dayKey;
-
   double? voltage;
   double? current;      // 主電流值
   double? glucose;      // 血糖值
   double? temperature;  // 新增溫度欄位
-
   List<double>? currents; // 儲存多個電流值的陣列
+
+  Sample();
+
+  // ✅ 便利建構子（不影響 Isar 的零參數建構子）
+  Sample.create({
+    Id? id,
+    required String deviceId,
+    required int seq,
+    required DateTime ts,
+    required String dayKey,
+    double? voltage,
+    double? current,
+    double? glucose,
+    double? temperature,
+    List<double>? currents,
+  }) {
+    if (id != null) this.id = id;
+    this.deviceId = deviceId;
+    this.seq = seq;
+    this.ts = ts;
+    this.dayKey = dayKey;
+    this.voltage = voltage;
+    this.current = current;
+    this.glucose = glucose;
+    this.temperature = temperature;
+    this.currents = currents;
+  }
 
   Sample copyWith({
     Id? id,
